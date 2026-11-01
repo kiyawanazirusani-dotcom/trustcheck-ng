@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Protect LICENSE file",
+      "trigger": "PreToolUse",
+      "description": "Block any write/edit/delete targeting the repo-root LICENSE file (project hard rule).",
+      "matcher": "^(fs_write|fs_append|str_replace|delete_file)$",
+      "action": {
+        "type": "command",
+        "command": "bash .kiro/hooks/scripts/protect-license.sh",
+        "timeout": 10
+      }
+    }
+  ]
+}

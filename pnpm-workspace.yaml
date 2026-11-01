@@ -1,0 +1,7 @@
+allowBuilds:
+  '@google/genai': true
+  protobufjs: true
+  tesseract.js: true
+# pnpm v12 reads project settings here.
+# onlyBuiltDependencies: allow these packages to run their install-time build scripts.
+# (single-package repo: no `packages` field means only the root package is included.)

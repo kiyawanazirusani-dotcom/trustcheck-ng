@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body {
+  @apply bg-stone-50 text-stone-900 antialiased;
+  min-height: 100%;
+}
+
+@media (prefers-color-scheme: dark) {
+  html,
+  body {
+    @apply bg-stone-950 text-stone-100;
+  }
+}
+
+/* A "stitched" patch border — ragged seams, the Frankenstein motif. */
+.patch {
+  position: relative;
+  border: 2px dashed theme("colors.seam");
+  border-radius: 0.5rem;
+  background: theme("colors.patch");
+  padding: 0.75rem;
+}
+
+.patch::before {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 0.625rem;
+  border: 1px solid theme("colors.seam" / 40%);
+  pointer-events: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  .patch {
+    background: color-mix(in srgb, theme("colors.patch") 12%, theme("colors.stone.900"));
+  }
+}

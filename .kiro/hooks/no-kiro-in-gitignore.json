@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Keep .kiro tracked",
+      "trigger": "PreToolUse",
+      "description": "Block edits to the repo-root .gitignore that would add .kiro (specs/steering/hooks must stay tracked).",
+      "matcher": "^(fs_write|fs_append|str_replace)$",
+      "action": {
+        "type": "command",
+        "command": "bash .kiro/hooks/scripts/no-kiro-in-gitignore.sh",
+        "timeout": 10
+      }
+    }
+  ]
+}

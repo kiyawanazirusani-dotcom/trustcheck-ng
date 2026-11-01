@@ -1,0 +1,17 @@
+{
+  "name": "TrustCheck NG",
+  "short_name": "TrustCheck",
+  "description": "Stitch mismatched payment evidence into one scam verdict. Offline-first PWA for Nigerians, bilingual (English + Hausa) with on-device OCR.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1c1917",
+  "theme_color": "#8b5a2b",
+  "lang": "en",
+  "categories": ["finance", "utilities"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
