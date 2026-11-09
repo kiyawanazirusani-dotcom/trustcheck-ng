@@ -188,7 +188,7 @@ describe("score + computeVerdict", () => {
     expect(v.confidence).toBe(0);
   });
   it("one danger => suspicious", () => {
-    const v = computeVerdict([link("https://paypa1.com")], NOW);
+    const v = computeVerdict([shot("From: 08031234567"), phone("08111111111")], NOW);
     expect(v.confidence).toBe(0.4);
     expect(v.level).toBe("suspicious");
   });
@@ -203,13 +203,64 @@ describe("score + computeVerdict", () => {
   });
   it("bank-verify-ok offsets danger", () => {
     // danger 0.4 + ok info(-0.15) => 0.25 => clean
-    const evs = [link("https://paypa1.com"), verify("GTBank", "GTBank N5000 successful")];
+    const evs = [shot("From: 08031234567"), phone("08111111111"), verify("GTBank", "GTBank N5000 successful")];
     const v = computeVerdict(evs, NOW);
-    expect(v.confidence).toBe(0.25);
-    expect(v.level).toBe("clean");
+    expect(v.confidence).toBe(0.3); // 0.25 raw, floored to 0.3: a danger flag is never "clean"
+    expect(v.level).toBe("suspicious");
+  });
+  it("a bank-impersonating link is scam even with a good bank-verify", () => {
+    const v = computeVerdict([link("https://paypa1.com"), verify("GTBank", "GTBank N5000 successful")], NOW);
+    expect(v.level).toBe("scam");
   });
   it("pieceFindings grouped by id, cross under __cross__", () => {
     const v = computeVerdict([shot("From: 08031234567"), phone("08111111111")], NOW);
     expect(v.pieceFindings["__cross__"]).toBeDefined();
+  });
+});
+
+describe("bank-impersonation scam (gtb-verify.xyz)", () => {
+  const scamText = "Your account has been credited with N50,000. Click http://gtb-verify.xyz to confirm.";
+  const scamLink = "http://gtb-verify.xyz";
+
+  it("flags the text as click-to-confirm-credit and impersonating link", () => {
+    const f = analyzePiece(text(scamText), NOW).map((x) => x.id);
+    expect(f).toContain("text-click-confirm-credit");
+    expect(f).toContain("text-link-impersonation");
+  });
+
+  it("flags the link as non-official bank domain, odd TLD and phishing word", () => {
+    const f = analyzePiece(link(scamLink), NOW).map((x) => x.id);
+    expect(f).toContain("link-bank-impersonation");
+    expect(f).toContain("link-odd-tld");
+    expect(f).toContain("link-phish-words");
+    expect(f).toContain("link-http");
+  });
+
+  it("verdict is scam for both pieces together, and for each alone", () => {
+    const both = computeVerdict([text(scamText), link(scamLink)], NOW);
+    expect(both.level).toBe("scam");
+    expect(both.confidence).toBeGreaterThanOrEqual(0.7);
+    expect(computeVerdict([text(scamText)], NOW).level).toBe("scam");
+    expect(computeVerdict([link(scamLink)], NOW).level).toBe("scam");
+  });
+
+  it("a lone warn flag is never reported as clean", () => {
+    expect(computeVerdict([link("http://example.com")], NOW).level).toBe("suspicious");
+  });
+});
+
+describe("normal real alert stays clean", () => {
+  const real = "GTBank: Acct 012***789 Credit Amt: NGN 50,000.00 Desc: Transfer from ADE OKAFOR Bal: NGN 120,500.00";
+  it("no flags for a genuine alert with no link", () => {
+    expect(analyzePiece(text(real), NOW)).toEqual([]);
+    const v = computeVerdict([text(real)], NOW);
+    expect(v.level).toBe("clean");
+    expect(v.findings).toHaveLength(0);
+  });
+  it("official bank domains are not flagged", () => {
+    for (const u of ["https://gtbank.com", "https://www.gtbank.com/online", "https://ibank.gtbank.com", "https://www.zenithbank.com"]) {
+      expect(analyzePiece(link(u), NOW)).toEqual([]);
+    }
+    expect(computeVerdict([text(real), link("https://www.gtbank.com")], NOW).level).toBe("clean");
   });
 });

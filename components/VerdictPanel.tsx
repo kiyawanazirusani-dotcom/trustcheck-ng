@@ -8,7 +8,7 @@ const LEVEL_META: Record<
 > = {
   clean: { label: "Clean", icon: "✓", badge: "bg-clean", bar: "bg-clean", text: "text-clean" },
   suspicious: { label: "Suspicious", icon: "!", badge: "bg-suspicious", bar: "bg-suspicious", text: "text-suspicious" },
-  scam: { label: "Scam", icon: "✕", badge: "bg-scam", bar: "bg-scam", text: "text-scam" },
+  scam: { label: "Likely scam", icon: "✕", badge: "bg-scam", bar: "bg-scam", text: "text-scam" },
 };
 
 const SEV_DOT: Record<Finding["severity"], string> = {

@@ -155,6 +155,73 @@ export function lookalikeBrand(label: string): string | undefined {
   return undefined;
 }
 
+// Official domains per Nigerian bank/fintech brand. A host that mentions the
+// brand but is not one of these (or a subdomain of them) is an impersonation.
+interface BrandInfo {
+  name: string;
+  /** Matched as substring of the hyphen-stripped label (len >= 5) ... */
+  long: string[];
+  /** ... or as a whole hyphen-delimited token (short, ambiguous names). */
+  short: string[];
+  official: string[];
+}
+const BRAND_DOMAINS: BrandInfo[] = [
+  { name: "GTBank", long: ["gtbank", "guarantytrust"], short: ["gtb", "gtco"], official: ["gtbank.com", "gtbank.com.ng", "gtco.com", "gtbankplc.com"] },
+  { name: "Access Bank", long: ["accessbank"], short: [], official: ["accessbankplc.com", "accessbank.com"] },
+  { name: "Zenith Bank", long: ["zenithbank", "zenith"], short: [], official: ["zenithbank.com"] },
+  { name: "UBA", long: ["unitedbankforafrica"], short: ["uba"], official: ["ubagroup.com", "uba.com"] },
+  { name: "FirstBank", long: ["firstbank"], short: [], official: ["firstbanknigeria.com", "firstbankgroup.com", "firstbank.com.ng"] },
+  { name: "Sterling Bank", long: ["sterlingbank"], short: [], official: ["sterling.ng", "sterlingbankng.com"] },
+  { name: "FCMB", long: ["fcmb"], short: [], official: ["fcmb.com"] },
+  { name: "Union Bank", long: ["unionbank"], short: [], official: ["unionbankng.com"] },
+  { name: "Wema Bank", long: ["wemabank"], short: ["wema", "alat"], official: ["wemabank.com", "alat.ng"] },
+  { name: "OPay", long: ["opay"], short: [], official: ["opayweb.com", "opay.com", "opay-nigeria.com"] },
+  { name: "Moniepoint", long: ["moniepoint"], short: [], official: ["moniepoint.com"] },
+  { name: "PalmPay", long: ["palmpay"], short: [], official: ["palmpay.com"] },
+  { name: "Fidelity Bank", long: ["fidelitybank"], short: [], official: ["fidelitybank.ng", "fidelitybank.com"] },
+  { name: "Kuda", long: ["kuda"], short: [], official: ["kuda.com"] },
+  { name: "Paystack", long: ["paystack"], short: [], official: ["paystack.com", "paystack.co"] },
+  { name: "Flutterwave", long: ["flutterwave"], short: [], official: ["flutterwave.com"] },
+  { name: "PayPal", long: ["paypal"], short: [], official: ["paypal.com"] },
+];
+
+export function isOfficialDomain(host: string, official: string[]): boolean {
+  const h = host.toLowerCase().replace(/\.$/, "");
+  return official.some((d) => h === d || h.endsWith(`.${d}`));
+}
+
+/** Brand named inside a host that is NOT one of that brand's official domains. */
+export function impersonatedBrand(host: string): string | undefined {
+  const h = host.toLowerCase();
+  const compact = h.replace(/[^a-z0-9.]/g, "");
+  const tokens = h.split(/[.\-_]/);
+  for (const b of BRAND_DOMAINS) {
+    const hit = b.long.some((t) => compact.includes(t)) || b.short.some((t) => tokens.includes(t));
+    if (hit && !isOfficialDomain(h, b.official)) return b.name;
+  }
+  return undefined;
+}
+
+const SUSPICIOUS_TLDS = new Set([
+  "xyz", "top", "click", "link", "icu", "buzz", "gq", "tk", "ml", "cf", "ga", "work",
+  "support", "live", "online", "site", "club", "info", "rest", "cyou", "vip", "monster",
+]);
+
+export function suspiciousTld(host: string): string | undefined {
+  const tld = host.toLowerCase().split(".").pop() ?? "";
+  return SUSPICIOUS_TLDS.has(tld) ? tld : undefined;
+}
+
+const PHISH_URL_WORDS = [
+  "verify", "verification", "confirm", "secure", "login", "signin", "update",
+  "validate", "unlock", "reactivate", "claim", "bonus", "alert", "support", "kyc", "bvn",
+];
+
+export function phishUrlWords(host: string): string[] {
+  const tokens = host.toLowerCase().split(/[.\-_]/);
+  return PHISH_URL_WORDS.filter((w) => tokens.some((t) => t.includes(w)));
+}
+
 // ---------------------------------------------------------------------------
 // Text helpers
 // ---------------------------------------------------------------------------
@@ -170,6 +237,17 @@ const PHISH_PHRASES = [
 export function hasPhishing(text: string): boolean {
   const t = text.toLowerCase();
   return PHISH_PHRASES.some((p) => t.includes(p));
+}
+
+const URL_RE = /(?:https?:\/\/|www\.)[^\s]+/i;
+
+/** Text that claims a credit and tells the user to click/open a link to confirm it. */
+export function asksClickToConfirmCredit(text: string): boolean {
+  const t = text.toLowerCase();
+  const credit = /\b(credit(?:ed)?|received|deposit(?:ed)?|payment|transfer|refund)\b/.test(t);
+  const click = /\b(click|tap|open|visit|follow|go to)\b/.test(t) || URL_RE.test(t);
+  const confirm = /\b(confirm|verify|validate|claim|receive|accept|activate|view|check)\b/.test(t);
+  return credit && click && confirm && (URL_RE.test(t) || /\b(link|here)\b/.test(t));
 }
 
 export function extractSender(text: string): string | undefined {
@@ -209,6 +287,18 @@ export function analyzePiece(ev: Evidence, now: number = Date.now()): Finding[] 
       } else if (ev.url.startsWith("http://")) {
         f.push({ id: "link-http", severity: "warn", message: "The link is not secure (http instead of https)." });
       }
+      const imp = impersonatedBrand(host);
+      if (imp) {
+        f.push({ id: "link-bank-impersonation", severity: "danger", message: `The link's domain "${host}" uses the name of ${imp} but is not an official ${imp} website.` });
+      }
+      const tld = suspiciousTld(host);
+      if (tld) {
+        f.push({ id: "link-odd-tld", severity: "warn", message: `The link ends in ".${tld}", an unusual domain type often used in scams.` });
+      }
+      const words = phishUrlWords(host);
+      if (words.length > 0) {
+        f.push({ id: "link-phish-words", severity: "warn", message: `The link's domain contains pressure words (${words.join(", ")}) typical of phishing.` });
+      }
       const label = registrableLabel(host);
       const lk = lookalikeBrand(label);
       if (lk) {
@@ -219,6 +309,15 @@ export function analyzePiece(ev: Evidence, now: number = Date.now()): Finding[] 
     case "text": {
       if (hasPhishing(ev.raw)) {
         f.push({ id: "phish-keywords", severity: "warn", message: "The message uses urgency / phishing language." });
+      }
+      if (asksClickToConfirmCredit(ev.raw)) {
+        f.push({ id: "text-click-confirm-credit", severity: "danger", message: "The message claims a credit and asks you to click a link to confirm it. Real banks never ask you to do that." });
+      }
+      const urlInText = ev.raw.match(URL_RE)?.[0];
+      const textHost = urlInText ? hostnameOf(urlInText.replace(/[.,;)]+$/, "")) : undefined;
+      const textImp = textHost ? impersonatedBrand(textHost) : undefined;
+      if (textHost && textImp) {
+        f.push({ id: "text-link-impersonation", severity: "danger", message: `The message contains a link (${textHost}) that imitates ${textImp}.` });
       }
       const sender = extractSender(ev.raw);
       if (sender && isSuspiciousSender(sender)) {
@@ -339,6 +438,23 @@ export function analyzeCross(evs: Evidence[]): Finding[] {
 // ---------------------------------------------------------------------------
 // Verdict
 // ---------------------------------------------------------------------------
+/** Findings that on their own make the verdict "scam" (a link/text impersonating a bank). */
+const CRITICAL_IDS = new Set([
+  "link-bank-impersonation",
+  "link-lookalike",
+  "text-click-confirm-credit",
+  "text-link-impersonation",
+]);
+
+/** Never let a verdict read "clean" while flags exist; critical flags force "scam". */
+function applyFloors(all: Finding[], confidence: number, pieceFindings: Record<string, Finding[]>): Verdict {
+  let c = confidence;
+  if (all.some((f) => CRITICAL_IDS.has(f.id))) c = Math.max(c, 0.7);
+  else if (all.some((f) => f.severity === "danger" || f.severity === "warn")) c = Math.max(c, 0.3);
+  c = Math.round(c * 100) / 100;
+  return { level: levelFromConfidence(c), confidence: c, findings: all, pieceFindings };
+}
+
 export function computeVerdict(evs: Evidence[], now: number = Date.now()): Verdict {
   const pieceFindings: Record<string, Finding[]> = {};
   const all: Finding[] = [];
@@ -354,7 +470,5 @@ export function computeVerdict(evs: Evidence[], now: number = Date.now()): Verdi
   if (cross.length) pieceFindings["__cross__"] = cross;
 
   const confidence = Math.round(score(all) * 100) / 100;
-  const level = levelFromConfidence(confidence);
-
-  return { level, confidence, findings: all, pieceFindings };
+  return applyFloors(all, confidence, pieceFindings);
 }
