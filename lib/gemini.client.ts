@@ -33,3 +33,17 @@ export async function fetchExplanation(
   }
   return data;
 }
+
+/** Build the exact payload that would be sent. Used for BOTH the consent
+ *  preview and the request, so what the user approves is what is sent. */
+export function buildExplainRequest(verdict: {
+  level: ExplainRequest["verdictLevel"];
+  confidence: number;
+  findings: { message: string }[];
+}): ExplainRequest {
+  return {
+    verdictLevel: verdict.level,
+    confidence: verdict.confidence,
+    findings: verdict.findings.map((f) => f.message),
+  };
+}

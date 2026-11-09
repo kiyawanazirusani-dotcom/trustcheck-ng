@@ -81,20 +81,20 @@ Implementation order. Each task is independently verifiable. Do NOT touch
 - [ ] 9.5 Mobile-first Tailwind styling, accessible labels, color+icon verdict.
 
 ## T10 — Gemini server route + consent-gated explain UI
-- [ ] 10.1 Create `app/api/explain/route.ts` (validate input; require
+- [x] 10.1 Create `app/api/explain/route.ts` (validate input; require
   `GEMINI_API_KEY`; call `@google/genai`; return `{en, ha}`; 503 if no key).
-- [ ] 10.2 Create `lib/gemini.client.ts` (fetch wrapper, typed).
-- [ ] 10.3 Create `components/ExplainPanel.tsx` with consent gate (preview exact
+- [x] 10.2 Create `lib/gemini.client.ts` (fetch wrapper, typed).
+- [x] 10.3 Create `components/ExplainPanel.tsx` with consent gate (preview exact
   payload), disabled when offline, English + Hausa rendering.
-- [ ] 10.4 Wire `components/TtsButton.tsx` (per-language speak/stop, Hausa
+- [x] 10.4 Wire `components/TtsButton.tsx` (per-language speak/stop, Hausa
   fallback notice).
-- [ ] 10.5 Route test: missing key → 503; success path with mocked SDK.
+- [x] 10.5 Route test: missing key → 503; success path with mocked SDK.
 
 ## T11 — Privacy notice + final wiring
-- [ ] 11.1 Create `components/PrivacyNotice.tsx`; show on first use + accessible.
-- [ ] 11.2 Wire `app/page.tsx` (state, verdict, explain, offline, privacy).
-- [ ] 11.3 Add top-level README content describing the app + how to run.
-- [ ] 11.4 Verify `pnpm lint`, `pnpm build`, `pnpm test:run` all pass.
+- [x] 11.1 Create `components/PrivacyNotice.tsx`; show on first use + accessible.
+- [x] 11.2 Wire `app/page.tsx` (state, verdict, explain, offline, privacy).
+- [x] 11.3 Add top-level README content describing the app + how to run.
+- [x] 11.4 Verify `pnpm lint`, `pnpm build`, `pnpm test:run` all pass.
 
 ## T12 — Final verification
 - [ ] 12.1 Confirm no secrets in client bundle (grep for key usage).

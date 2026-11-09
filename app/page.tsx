@@ -6,6 +6,9 @@ import { computeVerdict } from "@/lib/rules";
 import { EvidenceInputPanel } from "@/components/EvidenceInputPanel";
 import { PatchStitcher } from "@/components/PatchStitcher";
 import { VerdictPanel } from "@/components/VerdictPanel";
+import { ExplainPanel } from "@/components/ExplainPanel";
+import { PrivacyNotice } from "@/components/PrivacyNotice";
+import { buildExplainRequest } from "@/lib/gemini.client";
 
 export default function Home() {
   const [evidence, setEvidence] = useState<Evidence[]>([]);
@@ -39,6 +42,8 @@ export default function Home() {
           Private by default. Everything stays on your phone and works offline.
         </p>
       </header>
+
+      <PrivacyNotice />
 
       <section aria-labelledby="add-heading" className="space-y-2">
         <h2 id="add-heading" className="text-lg font-semibold">
@@ -79,7 +84,14 @@ export default function Home() {
           3. Verdict
         </h2>
         {hasEvidence ? (
-          <VerdictPanel verdict={verdict} />
+          <>
+            <VerdictPanel verdict={verdict} />
+            {/* Re-keyed on the payload so consent never carries over to a new verdict. */}
+            <ExplainPanel
+              key={JSON.stringify(buildExplainRequest(verdict))}
+              verdict={verdict}
+            />
+          </>
         ) : (
           <p className="rounded-xl border border-dashed border-stone-300 p-4 text-sm text-stone-500 dark:border-stone-700">
             Your verdict appears here as soon as you add a piece of evidence.
