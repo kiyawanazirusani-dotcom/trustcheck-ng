@@ -7,7 +7,7 @@ import { GoogleGenAI } from "@google/genai";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const VALID_LEVELS = new Set(["clean", "suspicious", "scam"]);
+const VALID_LEVELS = new Set(["clean", "unverifiable", "suspicious", "scam"]);
 
 interface ParsedRequest {
   verdictLevel: string;

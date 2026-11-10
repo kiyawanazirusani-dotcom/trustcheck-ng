@@ -26,7 +26,7 @@ function summary(ev: Evidence): string {
 }
 
 const SEV_BADGE: Record<Finding["severity"], string> = {
-  info: "bg-clean/20 text-clean",
+  info: "bg-stone-200 text-stone-700 dark:bg-stone-700 dark:text-stone-200",
   warn: "bg-suspicious/20 text-suspicious",
   danger: "bg-scam/20 text-scam",
 };

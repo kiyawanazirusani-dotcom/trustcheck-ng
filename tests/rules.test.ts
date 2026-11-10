@@ -147,8 +147,8 @@ describe("analyzePiece", () => {
     expect(analyzePiece(shot("Credit 2099-01-01 N500"), NOW).some((x) => x.id === "date-future")).toBe(true);
     expect(analyzePiece(shot("Credit 2020-01-01 N500"), NOW).some((x) => x.id === "date-stale")).toBe(true);
   });
-  it("bank-verify ok vs mismatch", () => {
-    expect(analyzePiece(verify("GTBank", "GTBank: N5,000 successful"), NOW)[0].id).toBe("bank-verify-ok");
+  it("bank-verify: piece rule only flags mismatches; naming the bank is no longer trust", () => {
+    expect(analyzePiece(verify("GTBank", "GTBank: N5,000 successful"), NOW)).toEqual([]);
     expect(analyzePiece(verify("GTBank", "Access Bank: transfer done"), NOW)[0].id).toBe("bank-verify-mismatch");
     expect(analyzePiece(verify("GTBank", "random text"), NOW)[0].id).toBe("bank-verify-mismatch");
   });
@@ -182,9 +182,9 @@ describe("analyzeCross", () => {
 });
 
 describe("score + computeVerdict", () => {
-  it("empty evidence => clean, confidence 0", () => {
+  it("empty evidence => cannot verify, confidence 0", () => {
     const v = computeVerdict([], NOW);
-    expect(v.level).toBe("clean");
+    expect(v.level).toBe("unverifiable");
     expect(v.confidence).toBe(0);
   });
   it("one danger => suspicious", () => {
@@ -201,11 +201,16 @@ describe("score + computeVerdict", () => {
     expect(score([{ id: "w", severity: "warn", message: "x" }, { id: "w2", severity: "warn", message: "y" }])).toBeCloseTo(0.36, 5);
     expect(score([{ id: "w", severity: "warn", message: "x" }])).toBeCloseTo(0.18, 5);
   });
-  it("bank-verify-ok offsets danger", () => {
-    // danger 0.4 + ok info(-0.15) => 0.25 => clean
-    const evs = [shot("From: 08031234567"), phone("08111111111"), verify("GTBank", "GTBank N5000 successful")];
+  it("a strongly confirmed bank SMS offsets danger", () => {
+    // danger 0.4 + confirmed bank SMS (-0.15) => 0.25 raw, floored to 0.3
+    const evs = [
+      shot("From: 08031234567\nCredit N5,000"),
+      phone("08111111111"),
+      verify("GTBank", "From: GTBank\nGTBank N5,000 successful"),
+    ];
     const v = computeVerdict(evs, NOW);
-    expect(v.confidence).toBe(0.3); // 0.25 raw, floored to 0.3: a danger flag is never "clean"
+    expect(v.findings.some((f) => f.id === "bank-verify-ok")).toBe(true);
+    expect(v.confidence).toBe(0.3); // a danger flag is never "clean"
     expect(v.level).toBe("suspicious");
   });
   it("a bank-impersonating link is scam even with a good bank-verify", () => {
@@ -249,18 +254,181 @@ describe("bank-impersonation scam (gtb-verify.xyz)", () => {
   });
 });
 
-describe("normal real alert stays clean", () => {
+describe("normal real alert", () => {
   const real = "GTBank: Acct 012***789 Credit Amt: NGN 50,000.00 Desc: Transfer from ADE OKAFOR Bal: NGN 120,500.00";
-  it("no flags for a genuine alert with no link", () => {
+  it("raises no flags, but a lone alert has nothing checkable => cannot verify (not green)", () => {
     expect(analyzePiece(text(real), NOW)).toEqual([]);
     const v = computeVerdict([text(real)], NOW);
-    expect(v.level).toBe("clean");
     expect(v.findings).toHaveLength(0);
+    expect(v.level).toBe("unverifiable");
   });
-  it("official bank domains are not flagged", () => {
+  it("official bank domains are not flagged; with an https official link a real check passed => clean", () => {
     for (const u of ["https://gtbank.com", "https://www.gtbank.com/online", "https://ibank.gtbank.com", "https://www.zenithbank.com"]) {
       expect(analyzePiece(link(u), NOW)).toEqual([]);
     }
-    expect(computeVerdict([text(real), link("https://www.gtbank.com")], NOW).level).toBe("clean");
+    const v = computeVerdict([text(real), link("https://www.gtbank.com")], NOW);
+    expect(v.level).toBe("clean");
+    expect(v.checks.map((c) => c.id)).toContain("link-official");
+  });
+});
+
+describe("1. screenshot (OCR) text goes through the same scam rules", () => {
+  const scamOcr = "Your account has been credited with N50,000. Click http://gtb-verify.xyz to confirm.";
+  it("flags OCR text and the links inside it", () => {
+    const ids = analyzePiece(shot(scamOcr), NOW).map((x) => x.id);
+    expect(ids).toContain("text-click-confirm-credit");
+    expect(ids).toContain("text-link-impersonation");
+    expect(ids).toContain("link-odd-tld");
+    expect(ids).toContain("link-http");
+  });
+  it("flags phishing language and spoofed sender in OCR text", () => {
+    const ids = analyzePiece(shot("From: PROMO\nURGENT: verify your account"), NOW).map((x) => x.id);
+    expect(ids).toContain("phish-keywords");
+    expect(ids).toContain("sender-spoof");
+  });
+  it("shows the flags on the screenshot patch and makes the verdict a scam", () => {
+    const s = shot(scamOcr);
+    const v = computeVerdict([s], NOW);
+    expect(v.level).toBe("scam");
+    expect(v.pieceFindings[s.id].some((f) => f.id === "text-link-impersonation")).toBe(true);
+  });
+  it("a genuine alert in a screenshot raises no new flags", () => {
+    expect(analyzePiece(shot("GTBank Credit Alert N5,000.00 Bal N9,000.00"), NOW)).toEqual([]);
+  });
+});
+
+describe("2. shortened links", () => {
+  it.each(["https://bit.ly/3abc", "http://tinyurl.com/x", "https://t.co/abc", "bit.ly/abc", "https://is.gd/q"])(
+    "warns that the destination is hidden: %s",
+    (u) => {
+      const f = analyzePiece(link(u), NOW).find((x) => x.id === "link-shortener");
+      expect(f?.severity).toBe("warn");
+      expect(f?.message).toMatch(/destination is hidden/i);
+      expect(computeVerdict([link(u)], NOW).level).toBe("suspicious");
+    },
+  );
+  it("also warns about shortened links inside pasted text and OCR text", () => {
+    expect(analyzePiece(text("Claim your refund: bit.ly/abc123 now"), NOW).some((x) => x.id === "link-shortener")).toBe(true);
+    expect(analyzePiece(shot("Open https://tinyurl.com/zz to confirm"), NOW).some((x) => x.id === "link-shortener")).toBe(true);
+  });
+  it("does not flag look-alike non-shortener hosts", () => {
+    expect(analyzePiece(link("https://orbit.ly.example.com"), NOW).some((x) => x.id === "link-shortener")).toBe(false);
+  });
+});
+
+describe("3. cannot verify vs clean", () => {
+  it("a phone number alone is 'unverifiable', not clean", () => {
+    const v = computeVerdict([phone("08031234567")], NOW);
+    expect(v.level).toBe("unverifiable");
+    expect(v.checks).toEqual([]);
+  });
+  it("a plain link with no checkable signals is 'unverifiable'", () => {
+    expect(computeVerdict([link("https://example.com")], NOW).level).toBe("unverifiable");
+  });
+  it("clean needs a real passed check (matching phone + alert)", () => {
+    const v = computeVerdict([shot("GTBank\nFrom: 08031234567\nCredit N5,000"), phone("08031234567")], NOW);
+    expect(v.level).toBe("clean");
+    expect(v.checks.map((c) => c.id)).toContain("phone-match");
+  });
+  it("flags still win over 'unverifiable'", () => {
+    expect(computeVerdict([link("http://example.com")], NOW).level).toBe("suspicious");
+  });
+});
+
+describe("4. weak 'mentions the bank' is no longer a trust signal", () => {
+  const alert = text("Credit alert: N5,000 received");
+  it("naming the bank alone is not verified and not green", () => {
+    const evs = [alert, verify("GTBank", "GTBank: N5,000 transfer successful")];
+    const v = computeVerdict(evs, NOW);
+    expect(v.findings.some((f) => f.id === "bank-verify-ok")).toBe(false);
+    expect(v.findings.some((f) => f.id === "bank-verify-unconfirmed")).toBe(true);
+    expect(v.checks.map((c) => c.id)).not.toContain("bank-verify-ok");
+  });
+  it("a bank SMS alone (no alert amount to compare) is not verified => cannot verify", () => {
+    const v = computeVerdict([verify("GTBank", "From: GTBank\nN5,000 successful")], NOW);
+    expect(v.findings.some((f) => f.id === "bank-verify-ok")).toBe(false);
+    expect(v.level).toBe("unverifiable");
+  });
+  it("sender format OK but amount missing from the alert side => not verified", () => {
+    const v = computeVerdict([text("hello"), verify("GTBank", "From: GTBank\nN5,000 successful")], NOW);
+    expect(v.findings.some((f) => f.id === "bank-verify-ok")).toBe(false);
+  });
+  it("amount matches but sender line is missing => not verified", () => {
+    const v = computeVerdict([alert, verify("GTBank", "GTBank N5,000 successful")], NOW);
+    expect(v.findings.some((f) => f.id === "bank-verify-ok")).toBe(false);
+  });
+  it("amount matches but sender is a different bank / spoofed mask => not verified", () => {
+    for (const s of ["From: Access Bank", "From: PROMO", "From: 08031234567"]) {
+      const v = computeVerdict([alert, verify("GTBank", `${s}\nGTBank N5,000 successful`)], NOW);
+      expect(v.findings.some((f) => f.id === "bank-verify-ok")).toBe(false);
+    }
+  });
+  it("expected sender + matching alert amount => verified, a real check, and clean", () => {
+    const v = computeVerdict([alert, verify("GTBank", "From: GTBank\nGTBank: N5,000 transfer successful")], NOW);
+    expect(v.findings.some((f) => f.id === "bank-verify-ok")).toBe(true);
+    expect(v.checks.map((c) => c.id)).toContain("bank-verify-ok");
+    expect(v.level).toBe("clean");
+  });
+});
+
+describe("5. cross-checking amounts and account digits", () => {
+  const alertShot = () => shot("GTBank Credit Alert\nAmt: N50,000.00\nFrom: GTBank");
+  const bankSms = () => verify("GTBank", "From: GTBank\nGTBank: N5,000 transfer successful");
+
+  it("N50,000 alert vs N5,000 bank SMS => red 'Amounts do not match' on BOTH patches, verdict raised", () => {
+    const s = alertShot();
+    const b = bankSms();
+    const v = computeVerdict([s, b], NOW);
+    const f = v.findings.find((x) => x.id === "amount-mismatch");
+    expect(f?.severity).toBe("danger");
+    expect(f?.message).toMatch(/^Amounts do not match/);
+    expect(f?.message).toContain("₦50,000");
+    expect(f?.message).toContain("₦5,000");
+    expect(v.pieceFindings[s.id].some((x) => x.id === "amount-mismatch")).toBe(true);
+    expect(v.pieceFindings[b.id].some((x) => x.id === "amount-mismatch")).toBe(true);
+    expect(v.level).toBe("scam");
+    expect(v.findings.some((x) => x.id === "bank-verify-ok")).toBe(false);
+  });
+  it("same mismatch works for pasted text vs bank SMS", () => {
+    const t = text("You have received N50,000");
+    const b = bankSms();
+    const v = computeVerdict([t, b], NOW);
+    expect(v.pieceFindings[t.id].some((x) => x.id === "amount-mismatch")).toBe(true);
+    expect(v.pieceFindings[b.id].some((x) => x.id === "amount-mismatch")).toBe(true);
+    expect(v.level).toBe("scam");
+  });
+  it("matching amounts => no mismatch and an amount-match check", () => {
+    const v = computeVerdict([shot("Credit N5,000 GTBank"), bankSms()], NOW);
+    expect(v.findings.some((x) => x.id === "amount-mismatch")).toBe(false);
+    expect(v.checks.map((c) => c.id)).toContain("amount-match");
+  });
+  it("screenshot vs text mismatch still flags (warn) on both patches", () => {
+    const s = shot("Credit N5,000.00");
+    const t = text("You sent N3,000");
+    const v = computeVerdict([s, t], NOW);
+    expect(v.pieceFindings[s.id].some((x) => x.id === "amount-mismatch")).toBe(true);
+    expect(v.pieceFindings[t.id].some((x) => x.id === "amount-mismatch")).toBe(true);
+  });
+  it("account digits that differ => red 'Account digits do not match' on both patches", () => {
+    const s = shot("GTBank Credit N5,000 Acct 0123456789");
+    const b = verify("GTBank", "From: GTBank\nGTBank N5,000 successful Acct 0987654321");
+    const v = computeVerdict([s, b], NOW);
+    const f = v.findings.find((x) => x.id === "account-mismatch");
+    expect(f?.severity).toBe("danger");
+    expect(f?.message).toMatch(/^Account digits do not match/);
+    expect(v.pieceFindings[s.id].some((x) => x.id === "account-mismatch")).toBe(true);
+    expect(v.pieceFindings[b.id].some((x) => x.id === "account-mismatch")).toBe(true);
+    expect(v.level).toBe("scam");
+  });
+  it("masked account digits are compared on the visible digits", () => {
+    const ok = computeVerdict([shot("Credit N5,000 Acct 012***789"), verify("GTBank", "From: GTBank\nN5,000 GTBank Acct 0123456789")], NOW);
+    expect(ok.findings.some((x) => x.id === "account-mismatch")).toBe(false);
+    expect(ok.checks.map((c) => c.id)).toContain("account-match");
+    const bad = computeVerdict([shot("Credit N5,000 Acct 012***789"), verify("GTBank", "From: GTBank\nN5,000 GTBank Acct 0123456780")], NOW);
+    expect(bad.findings.some((x) => x.id === "account-mismatch")).toBe(true);
+  });
+  it("no account digits on one side => no account flag", () => {
+    const v = computeVerdict([shot("Credit N5,000 Acct 0123456789"), bankSms()], NOW);
+    expect(v.findings.some((x) => x.id === "account-mismatch")).toBe(false);
   });
 });

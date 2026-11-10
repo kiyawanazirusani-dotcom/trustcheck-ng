@@ -17,9 +17,22 @@ export interface Finding {
   severity: Severity;
   /** Human-readable reason, in English (the Gemini layer adds Hausa). */
   message: string;
+  /** Evidence patches this finding relates to (cross-piece seams). The flag is
+   *  shown on each of these patches. */
+  evidenceIds?: string[];
 }
 
-export type VerdictLevel = "clean" | "suspicious" | "scam";
+/** A real check that passed (a positive signal). "Clean" requires at least one. */
+export interface PassedCheck {
+  id: string;
+  message: string;
+}
+
+/**
+ * "unverifiable" = neutral "Cannot verify": no red flags, but also nothing
+ * checkable passed (e.g. a phone number on its own). Never shown as green.
+ */
+export type VerdictLevel = "clean" | "unverifiable" | "suspicious" | "scam";
 
 /** The stitched verdict — the "monster" assembled from the evidence patches. */
 export interface Verdict {
@@ -30,6 +43,8 @@ export interface Verdict {
   findings: Finding[];
   /** Findings grouped by the evidence id they relate to. */
   pieceFindings: Record<string, Finding[]>;
+  /** Real checks that passed. Empty => the verdict can never be "clean". */
+  checks: PassedCheck[];
 }
 
 /** A bank in the guided-verification catalog. */

@@ -3,7 +3,7 @@
 // after the user explicitly consents to the exact payload being sent.
 
 export interface ExplainRequest {
-  verdictLevel: "clean" | "suspicious" | "scam";
+  verdictLevel: "clean" | "unverifiable" | "suspicious" | "scam";
   confidence: number;
   findings: string[];
 }

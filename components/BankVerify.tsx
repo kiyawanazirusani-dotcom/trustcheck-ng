@@ -76,14 +76,14 @@ export function BankVerify({ onAdd }: { onAdd: (ev: Evidence) => void }) {
 
       <div className="space-y-2">
         <label htmlFor="confirm-sms" className="block text-sm font-medium">
-          Paste the confirmation message
+          Paste the confirmation message (include the sender, e.g. &quot;From: GTBank&quot;)
         </label>
         <textarea
           id="confirm-sms"
           value={sms}
           onChange={(e) => setSms(e.target.value)}
           rows={4}
-          placeholder="e.g. GTBank: N5,000 transfer to … was successful. Ref 123456"
+          placeholder={"e.g.\nFrom: GTBank\nGTBank: N5,000 transfer to … was successful. Ref 123456"}
           className="w-full rounded-lg border border-stone-300 bg-white p-3 text-sm dark:border-stone-700 dark:bg-stone-900"
         />
         <button

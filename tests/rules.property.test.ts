@@ -87,7 +87,7 @@ describe("rules engine — properties", () => {
     fc.assert(
       fc.property(fc.array(evidenceArb, { maxLength: 8 }), (evs) => {
         const v = computeVerdict(evs, NOW);
-        const levelOk = v.level === "clean" || v.level === "suspicious" || v.level === "scam";
+        const levelOk = ["clean", "unverifiable", "suspicious", "scam"].includes(v.level);
         const confOk = v.confidence >= 0 && v.confidence <= 1;
         // robust 2-decimal check (avoids float artifacts like 0.58*100 === 57.999…)
         const rounded = Math.round(v.confidence * 100) / 100 === v.confidence;
@@ -122,12 +122,23 @@ describe("rules engine — properties", () => {
       textEv("GTBank: N5,000 credited to your account"),
       phoneEv("08031234567"),
       linkEv("https://gtbank.com"),
-      verifyEv("GTBank", "GTBank: N5,000 transfer successful"),
+      verifyEv("GTBank", "From: GTBank\nGTBank: N5,000 transfer successful"),
     ];
     const v = computeVerdict(consistent, NOW);
     expect(v.level).toBe("clean");
     expect(v.confidence).toBe(0);
-    // the only finding should be the legit bank-verify-ok
+    // only non-flag (info) findings: the strongly confirmed bank SMS
     expect(v.findings.every((f) => f.id === "bank-verify-ok")).toBe(true);
+    expect(v.checks.length).toBeGreaterThan(0);
+  });
+
+  it("never reports clean without a passed check", () => {
+    fc.assert(
+      fc.property(fc.array(evidenceArb, { maxLength: 8 }), (evs) => {
+        const v = computeVerdict(evs, NOW);
+        return v.level !== "clean" || v.checks.length > 0;
+      }),
+      { numRuns: RUNS },
+    );
   });
 });

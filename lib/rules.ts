@@ -7,12 +7,14 @@ import type {
   BankVerifyEvidence,
   Evidence,
   Finding,
+  PassedCheck,
   ScreenshotEvidence,
   Severity,
   TextEvidence,
   Verdict,
   VerdictLevel,
 } from "./types";
+import { rawOf } from "./types";
 import { findBankByText } from "./banks";
 
 // ---------------------------------------------------------------------------
@@ -31,7 +33,7 @@ export function score(findings: Finding[]): number {
 function levelFromConfidence(c: number): VerdictLevel {
   if (c >= 0.7) return "scam";
   if (c >= 0.3) return "suspicious";
-  return "clean";
+  return "clean"; // computeVerdict downgrades this to "unverifiable" without real checks
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +224,60 @@ export function phishUrlWords(host: string): string[] {
   return PHISH_URL_WORDS.filter((w) => tokens.some((t) => t.includes(w)));
 }
 
+// URL shorteners hide the real destination.
+const SHORTENER_HOSTS = [
+  "bit.ly", "tinyurl.com", "t.co", "goo.gl", "is.gd", "v.gd", "ow.ly", "buff.ly",
+  "rebrand.ly", "cutt.ly", "shorturl.at", "tiny.cc", "rb.gy", "t.ly", "bl.ink",
+  "s.id", "lnkd.in", "shorte.st", "adf.ly", "bitly.com", "tr.ee", "short.io",
+];
+
+export function isShortener(host: string): boolean {
+  const h = host.toLowerCase().replace(/\.$/, "");
+  return SHORTENER_HOSTS.some((s) => h === s || h.endsWith(`.${s}`));
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** All URLs in free text: http(s)://…, www.…, and bare shortener links (bit.ly/x). */
+export function extractUrls(text: string): string[] {
+  const out = new Set<string>();
+  const bare = new RegExp(`(?<![\\w@.-])(?:${SHORTENER_HOSTS.map(escapeRe).join("|")})/[^\\s]+`, "gi");
+  for (const re of [/(?:https?:\/\/|www\.)[^\s]+/gi, bare]) {
+    for (const m of text.matchAll(re)) out.add(m[0].replace(/[.,;:!?)"'\]]+$/, ""));
+  }
+  return [...out];
+}
+
+/** The brand whose OFFICIAL domain this host is, if any. */
+export function officialBrandOf(host: string): string | undefined {
+  return BRAND_DOMAINS.find((b) => isOfficialDomain(host, b.official))?.name;
+}
+
+/**
+ * A (possibly masked) account number. Full numbers have head === tail === all
+ * digits; masked ones ("012***789") keep only the visible head and tail.
+ */
+export interface AccountRef {
+  head: string;
+  tail: string;
+}
+
+/** Extract 10-digit account numbers and masked forms like 012***789. */
+export function extractAccounts(text: string): AccountRef[] {
+  const out: AccountRef[] = [];
+  for (const m of text.matchAll(/(?<!\d)\d{10}(?!\d)/g)) out.push({ head: m[0], tail: m[0] });
+  for (const m of text.matchAll(/(?<![\w*•])(\d{2,5})[*xX•#]{2,}(\d{2,5})(?![\w*•])/g)) {
+    out.push({ head: m[1], tail: m[2] });
+  }
+  return out;
+}
+
+export function accountsCompatible(a: AccountRef, b: AccountRef): boolean {
+  const headOk = a.head.startsWith(b.head) || b.head.startsWith(a.head);
+  const tailOk = a.tail.endsWith(b.tail) || b.tail.endsWith(a.tail);
+  return headOk && tailOk;
+}
+
 // ---------------------------------------------------------------------------
 // Text helpers
 // ---------------------------------------------------------------------------
@@ -267,7 +323,79 @@ export function isSuspiciousSender(sender: string): boolean {
 }
 
 function fmtAmounts(amounts: number[]): string {
-  return amounts.map((n) => `₦${n.toLocaleString()}`).join(" / ") || "—";
+  return amounts.map((n) => `₦${n.toLocaleString("en-US")}`).join(" / ") || "—";
+}
+
+function dedupe(findings: Finding[]): Finding[] {
+  const seen = new Set<string>();
+  return findings.filter((f) => (seen.has(f.id) ? false : (seen.add(f.id), true)));
+}
+
+/** Link rules, shared by link evidence and links found inside message/OCR text. */
+function linkFindings(url: string, inMessage: boolean): Finding[] {
+  const f: Finding[] = [];
+  const host = hostnameOf(url);
+  if (!host) {
+    if (!inMessage) f.push({ id: "link-malformed", severity: "warn", message: "The link could not be parsed." });
+    return f;
+  }
+  if (isShortener(host)) {
+    f.push({ id: "link-shortener", severity: "warn", message: `The link (${host}) is a shortened link: the real destination is hidden. Treat it as suspicious and do not open it.` });
+  }
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+    f.push({ id: "link-ip", severity: "warn", message: "The link points to a raw IP address instead of a domain — common in scams." });
+  } else if (url.toLowerCase().startsWith("http://")) {
+    f.push({ id: "link-http", severity: "warn", message: "The link is not secure (http instead of https)." });
+  }
+  const imp = impersonatedBrand(host);
+  if (imp) {
+    f.push(
+      inMessage
+        ? { id: "text-link-impersonation", severity: "danger", message: `The message contains a link (${host}) that imitates ${imp}.` }
+        : { id: "link-bank-impersonation", severity: "danger", message: `The link's domain "${host}" uses the name of ${imp} but is not an official ${imp} website.` },
+    );
+  }
+  const tld = suspiciousTld(host);
+  if (tld) {
+    f.push({ id: "link-odd-tld", severity: "warn", message: `The link ends in ".${tld}", an unusual domain type often used in scams.` });
+  }
+  const words = phishUrlWords(host);
+  if (words.length > 0) {
+    f.push({ id: "link-phish-words", severity: "warn", message: `The link's domain contains pressure words (${words.join(", ")}) typical of phishing.` });
+  }
+  const label = registrableLabel(host);
+  const lk = lookalikeBrand(label);
+  if (lk) {
+    f.push({ id: "link-lookalike", severity: "danger", message: `The link's domain "${label}" looks like an impersonation of "${lk}".` });
+  }
+  return f;
+}
+
+function dateFindings(raw: string, now: number, subject: string): Finding[] {
+  const f: Finding[] = [];
+  const d = extractDateEpoch(raw);
+  if (d) {
+    if (d > now + 60_000) f.push({ id: "date-future", severity: "warn", message: `The ${subject} is dated in the future.` });
+    else if (d < now - DAY_MS) f.push({ id: "date-stale", severity: "warn", message: `The ${subject} is more than 24 hours old — scammers reuse old alerts.` });
+  }
+  return f;
+}
+
+/** Scam rules for any free text: pasted messages AND OCR text from screenshots. */
+function messageFindings(raw: string, subject: string): Finding[] {
+  const f: Finding[] = [];
+  if (hasPhishing(raw)) {
+    f.push({ id: "phish-keywords", severity: "warn", message: `The ${subject} uses urgency / phishing language.` });
+  }
+  if (asksClickToConfirmCredit(raw)) {
+    f.push({ id: "text-click-confirm-credit", severity: "danger", message: `The ${subject} claims a credit and asks you to click a link to confirm it. Real banks never ask you to do that.` });
+  }
+  for (const url of extractUrls(raw)) f.push(...linkFindings(url, true));
+  const sender = extractSender(raw);
+  if (sender && isSuspiciousSender(sender)) {
+    f.push({ id: "sender-spoof", severity: "warn", message: `The sender "${sender}" looks like a spoofed mask.` });
+  }
+  return f;
 }
 
 // ---------------------------------------------------------------------------
@@ -276,88 +404,104 @@ function fmtAmounts(amounts: number[]): string {
 export function analyzePiece(ev: Evidence, now: number = Date.now()): Finding[] {
   const f: Finding[] = [];
   switch (ev.kind) {
-    case "link": {
-      const host = hostnameOf(ev.url);
-      if (!host) {
-        f.push({ id: "link-malformed", severity: "warn", message: "The link could not be parsed." });
-        break;
-      }
-      if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
-        f.push({ id: "link-ip", severity: "warn", message: "The link points to a raw IP address instead of a domain — common in scams." });
-      } else if (ev.url.startsWith("http://")) {
-        f.push({ id: "link-http", severity: "warn", message: "The link is not secure (http instead of https)." });
-      }
-      const imp = impersonatedBrand(host);
-      if (imp) {
-        f.push({ id: "link-bank-impersonation", severity: "danger", message: `The link's domain "${host}" uses the name of ${imp} but is not an official ${imp} website.` });
-      }
-      const tld = suspiciousTld(host);
-      if (tld) {
-        f.push({ id: "link-odd-tld", severity: "warn", message: `The link ends in ".${tld}", an unusual domain type often used in scams.` });
-      }
-      const words = phishUrlWords(host);
-      if (words.length > 0) {
-        f.push({ id: "link-phish-words", severity: "warn", message: `The link's domain contains pressure words (${words.join(", ")}) typical of phishing.` });
-      }
-      const label = registrableLabel(host);
-      const lk = lookalikeBrand(label);
-      if (lk) {
-        f.push({ id: "link-lookalike", severity: "danger", message: `The link's domain "${label}" looks like an impersonation of "${lk}".` });
-      }
+    case "link":
+      f.push(...linkFindings(ev.url, false));
       break;
-    }
-    case "text": {
-      if (hasPhishing(ev.raw)) {
-        f.push({ id: "phish-keywords", severity: "warn", message: "The message uses urgency / phishing language." });
-      }
-      if (asksClickToConfirmCredit(ev.raw)) {
-        f.push({ id: "text-click-confirm-credit", severity: "danger", message: "The message claims a credit and asks you to click a link to confirm it. Real banks never ask you to do that." });
-      }
-      const urlInText = ev.raw.match(URL_RE)?.[0];
-      const textHost = urlInText ? hostnameOf(urlInText.replace(/[.,;)]+$/, "")) : undefined;
-      const textImp = textHost ? impersonatedBrand(textHost) : undefined;
-      if (textHost && textImp) {
-        f.push({ id: "text-link-impersonation", severity: "danger", message: `The message contains a link (${textHost}) that imitates ${textImp}.` });
-      }
-      const sender = extractSender(ev.raw);
-      if (sender && isSuspiciousSender(sender)) {
-        f.push({ id: "sender-spoof", severity: "warn", message: `The sender "${sender}" looks like a spoofed mask.` });
-      }
-      const d = extractDateEpoch(ev.raw);
-      if (d) {
-        if (d > now + 60_000) f.push({ id: "date-future", severity: "warn", message: "The message is dated in the future." });
-        else if (d < now - DAY_MS) f.push({ id: "date-stale", severity: "warn", message: "The message is more than 24 hours old — scammers reuse old alerts." });
-      }
+    case "text":
+      f.push(...messageFindings(ev.raw, "message"));
+      f.push(...dateFindings(ev.raw, now, "message"));
       break;
-    }
-    case "screenshot": {
-      const d = extractDateEpoch(ev.ocrText);
-      if (d) {
-        if (d > now + 60_000) f.push({ id: "date-future", severity: "warn", message: "The payment alert is dated in the future." });
-        else if (d < now - DAY_MS) f.push({ id: "date-stale", severity: "warn", message: "The payment alert is more than 24 hours old — scammers reuse old alerts." });
-      }
+    case "screenshot":
+      // OCR text goes through the same rules as pasted text (incl. links inside it).
+      f.push(...messageFindings(ev.ocrText, "screenshot"));
+      f.push(...dateFindings(ev.ocrText, now, "payment alert"));
       break;
-    }
     case "bank-verify": {
+      // Only flags here. A *positive* result needs cross-checks (sender + amount
+      // matching the alert), so it is decided in analyzeCross, not by name alone.
       const mentioned = findBankByText(ev.confirmationSms);
-      if (mentioned && mentioned.name === ev.bank.name) {
-        f.push({ id: "bank-verify-ok", severity: "info", message: `Confirmation SMS mentions ${ev.bank.name}.` });
-      } else if (mentioned && mentioned.name !== ev.bank.name) {
+      if (mentioned && mentioned.name !== ev.bank.name) {
         f.push({ id: "bank-verify-mismatch", severity: "warn", message: `Confirmation SMS mentions ${mentioned.name}, not ${ev.bank.name}.` });
-      } else {
-        const okToken = /successful|debit|credit|completed|transaction|reference|debited|credited|approved/i.test(ev.confirmationSms);
-        if (okToken) {
-          f.push({ id: "bank-verify-ok", severity: "info", message: "Confirmation SMS looks like a real bank response (contains a transaction keyword)." });
-        } else {
-          f.push({ id: "bank-verify-mismatch", severity: "warn", message: `Confirmation SMS does not mention ${ev.bank.name}.` });
-        }
+      } else if (!mentioned) {
+        f.push({ id: "bank-verify-mismatch", severity: "warn", message: `Confirmation SMS does not mention ${ev.bank.name}.` });
       }
+      f.push(...messageFindings(ev.confirmationSms, "confirmation SMS"));
       break;
     }
     case "phone":
       break; // phones are evaluated in cross-piece rules
   }
-  return f;
+  return dedupe(f);
+}
+
+// ---------------------------------------------------------------------------
+// Cross-piece comparison of amounts / account digits
+// ---------------------------------------------------------------------------
+interface Source {
+  ev: Evidence;
+  label: string;
+  amounts: number[];
+  accounts: AccountRef[];
+}
+
+function sourcesOf(evs: Evidence[]): Source[] {
+  const out: Source[] = [];
+  for (const ev of evs) {
+    if (ev.kind !== "screenshot" && ev.kind !== "text" && ev.kind !== "bank-verify") continue;
+    const raw = ev.kind === "screenshot" ? ev.ocrText : ev.kind === "text" ? ev.raw : ev.confirmationSms;
+    const label = ev.kind === "screenshot" ? "the screenshot" : ev.kind === "text" ? "the message" : "the bank confirmation SMS";
+    out.push({ ev, label, amounts: extractAmounts(raw), accounts: extractAccounts(raw) });
+  }
+  return out;
+}
+
+/** Compare every pair of different evidence kinds that both carry a value. */
+function comparePairs<T>(
+  srcs: Source[],
+  get: (s: Source) => T[],
+  same: (a: T, b: T) => boolean,
+): { mismatches: [Source, Source][]; matches: number } {
+  const mismatches: [Source, Source][] = [];
+  let matches = 0;
+  for (let i = 0; i < srcs.length; i++) {
+    for (let j = i + 1; j < srcs.length; j++) {
+      const a = srcs[i];
+      const b = srcs[j];
+      if (a.ev.kind === b.ev.kind) continue;
+      const va = get(a);
+      const vb = get(b);
+      if (va.length === 0 || vb.length === 0) continue;
+      if (va.some((x) => vb.some((y) => same(x, y)))) matches++;
+      else mismatches.push([a, b]);
+    }
+  }
+  return { mismatches, matches };
+}
+
+const sameAmount = (a: number, b: number) => Math.abs(a - b) < 0.01;
+const fmtAccount = (a: AccountRef) => (a.head === a.tail ? a.head : `${a.head}…${a.tail}`);
+
+function seamFinding(
+  id: string,
+  title: string,
+  mismatches: [Source, Source][],
+  fmt: (s: Source) => string,
+): Finding {
+  const ids = new Set<string>();
+  let involvesBank = false;
+  const parts = mismatches.map(([a, b]) => {
+    ids.add(a.ev.id);
+    ids.add(b.ev.id);
+    if (a.ev.kind === "bank-verify" || b.ev.kind === "bank-verify") involvesBank = true;
+    return `${a.label} shows ${fmt(a)} but ${b.label} shows ${fmt(b)}`;
+  });
+  return {
+    id,
+    // A bank confirmation that contradicts the alert is the core scam signature.
+    severity: involvesBank ? "danger" : "warn",
+    message: `${title}: ${parts.join("; ")}.`,
+    evidenceIds: [...ids],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -400,22 +544,43 @@ export function analyzeCross(evs: Evidence[]): Finding[] {
     }
   }
 
-  // R-CROSS-AMOUNT: screenshot amount vs message amount
-  if (screenshot && textEvs.length > 0) {
-    const sAmt = extractAmounts(ocrText);
-    const tAmt = extractAmounts(messageText);
-    if (sAmt.length > 0 && tAmt.length > 0) {
-      const match = sAmt.some((a) => tAmt.some((b) => Math.abs(a - b) < 0.01));
-      if (!match) {
-        findings.push({
-          id: "amount-mismatch",
-          severity: "warn",
-          message: `The amount in the screenshot (${fmtAmounts(sAmt)}) does not match the amount in the message (${fmtAmounts(tAmt)}).`,
-        });
-      }
-    }
+  // R-CROSS-AMOUNT / R-CROSS-ACCOUNT: alert/screenshot/message vs bank confirmation.
+  const srcs = sourcesOf(evs);
+  const amt = comparePairs(srcs, (s) => s.amounts, sameAmount);
+  if (amt.mismatches.length > 0) {
+    findings.push(seamFinding("amount-mismatch", "Amounts do not match", amt.mismatches, (s) => fmtAmounts(s.amounts)));
+  }
+  const acct = comparePairs(srcs, (s) => s.accounts, accountsCompatible);
+  if (acct.mismatches.length > 0) {
+    findings.push(seamFinding("account-mismatch", "Account digits do not match", acct.mismatches, (s) => s.accounts.map(fmtAccount).join(" / ")));
   }
 
+  // R-BANK-CONFIRM: a bank confirmation SMS is only trusted when it passes
+  // strong checks. Merely naming the bank proves nothing (anyone can type it).
+  const alertAmounts = srcs.filter((s) => s.ev.kind !== "bank-verify").flatMap((s) => s.amounts);
+  for (const b of evs.filter((e): e is BankVerifyEvidence => e.kind === "bank-verify")) {
+    if (findBankByText(b.confirmationSms)?.name !== b.bank.name) continue; // piece rule already flags
+    const sender = extractSender(b.confirmationSms);
+    const senderOk = !!sender && findBankByText(sender)?.name === b.bank.name && !isSuspiciousSender(sender);
+    const smsAmounts = extractAmounts(b.confirmationSms);
+    const amountOk = smsAmounts.some((a) => alertAmounts.some((x) => sameAmount(a, x)));
+    if (senderOk && amountOk) {
+      findings.push({
+        id: "bank-verify-ok",
+        severity: "info",
+        message: `Confirmation SMS verified: sender "${sender}" matches ${b.bank.name} and the amount matches the alert.`,
+        evidenceIds: [b.id],
+      });
+    } else if (!findings.some((f) => f.evidenceIds?.includes(b.id) && f.severity === "danger")) {
+      const missing = [!senderOk && `a "From: ${b.bank.name}"-style sender line`, !amountOk && "an amount that matches the alert"].filter(Boolean);
+      findings.push({
+        id: "bank-verify-unconfirmed",
+        severity: "info",
+        message: `Confirmation SMS mentions ${b.bank.name}, but that alone proves nothing. It is not counted as verified: it needs ${missing.join(" and ")}.`,
+        evidenceIds: [b.id],
+      });
+    }
+  }
   // R-CROSS-LINK-MERCHANT: link brand vs bank/merchant in the message
   if (linkEv && textEvs.length > 0) {
     const host = hostnameOf((linkEv as { url: string }).url);
@@ -446,13 +611,72 @@ const CRITICAL_IDS = new Set([
   "text-link-impersonation",
 ]);
 
+/** Seam findings that are critical only when a bank confirmation contradicts the alert. */
+const CRITICAL_WHEN_DANGER = new Set(["amount-mismatch", "account-mismatch"]);
+
+const isCritical = (f: Finding) =>
+  CRITICAL_IDS.has(f.id) || (CRITICAL_WHEN_DANGER.has(f.id) && f.severity === "danger");
+
+/**
+ * Real checks that passed. "Clean" requires at least one; with none, the
+ * evidence simply cannot be verified (e.g. a phone number alone).
+ */
+export function collectChecks(evs: Evidence[], findings: Finding[]): PassedCheck[] {
+  const checks: PassedCheck[] = [];
+
+  for (const f of findings) {
+    if (f.id === "bank-verify-ok") checks.push({ id: f.id, message: f.message });
+  }
+
+  // Official bank website over https (standalone link or inside any text).
+  const urls = new Set<string>();
+  for (const ev of evs) {
+    if (ev.kind === "link") urls.add(ev.url);
+    else for (const u of extractUrls(rawOf(ev))) urls.add(u);
+  }
+  const seenHosts = new Set<string>();
+  for (const u of urls) {
+    const host = hostnameOf(u);
+    const brand = host ? officialBrandOf(host) : undefined;
+    if (host && brand && u.toLowerCase().startsWith("https://") && !seenHosts.has(host)) {
+      seenHosts.add(host);
+      checks.push({ id: "link-official", message: `The link ${host} is an official ${brand} website (https).` });
+    }
+  }
+
+  // Entered phone number appears in the alert/message.
+  const phoneEv = evs.find((e) => e.kind === "phone");
+  if (phoneEv) {
+    const n = normalizePhone(rawOf(phoneEv));
+    const known = extractPhones(evs.filter((e) => e.kind !== "phone").map(rawOf).join("\n"));
+    if (n && known.includes(n)) checks.push({ id: "phone-match", message: "The phone number you entered matches the one in the alert/message." });
+  }
+
+  const srcs = sourcesOf(evs);
+  if (comparePairs(srcs, (s) => s.amounts, sameAmount).matches > 0) {
+    checks.push({ id: "amount-match", message: "The amount matches across your evidence." });
+  }
+  if (comparePairs(srcs, (s) => s.accounts, accountsCompatible).matches > 0) {
+    checks.push({ id: "account-match", message: "The account digits match across your evidence." });
+  }
+  return checks;
+}
+
 /** Never let a verdict read "clean" while flags exist; critical flags force "scam". */
-function applyFloors(all: Finding[], confidence: number, pieceFindings: Record<string, Finding[]>): Verdict {
+function applyFloors(
+  all: Finding[],
+  confidence: number,
+  pieceFindings: Record<string, Finding[]>,
+  checks: PassedCheck[],
+): Verdict {
   let c = confidence;
-  if (all.some((f) => CRITICAL_IDS.has(f.id))) c = Math.max(c, 0.7);
+  if (all.some(isCritical)) c = Math.max(c, 0.7);
   else if (all.some((f) => f.severity === "danger" || f.severity === "warn")) c = Math.max(c, 0.3);
   c = Math.round(c * 100) / 100;
-  return { level: levelFromConfidence(c), confidence: c, findings: all, pieceFindings };
+  let level = levelFromConfidence(c);
+  // Green "Clean" only when a real check passed; otherwise it is neutral.
+  if (level === "clean" && checks.length === 0) level = "unverifiable";
+  return { level, confidence: c, findings: all, pieceFindings, checks };
 }
 
 export function computeVerdict(evs: Evidence[], now: number = Date.now()): Verdict {
@@ -467,8 +691,14 @@ export function computeVerdict(evs: Evidence[], now: number = Date.now()): Verdi
 
   const cross = analyzeCross(evs);
   all.push(...cross);
-  if (cross.length) pieceFindings["__cross__"] = cross;
+  // Seams (non-info) are listed under __cross__; every cross finding is also
+  // attached to the patches it names so the flag shows on each of them.
+  const seams = cross.filter((f) => f.severity !== "info");
+  if (seams.length) pieceFindings["__cross__"] = seams;
+  for (const f of cross) {
+    for (const eid of f.evidenceIds ?? []) (pieceFindings[eid] ??= []).push(f);
+  }
 
   const confidence = Math.round(score(all) * 100) / 100;
-  return applyFloors(all, confidence, pieceFindings);
+  return applyFloors(all, confidence, pieceFindings, collectChecks(evs, all));
 }
