@@ -4,10 +4,14 @@
 // red flags, then aggregates into a verdict.
 
 import type {
+  BalanceEvidence,
   BankVerifyEvidence,
+  Contradiction,
   Evidence,
   Finding,
   PassedCheck,
+  Report,
+  RiskLevel,
   ScreenshotEvidence,
   Severity,
   TextEvidence,
@@ -16,6 +20,7 @@ import type {
 } from "./types";
 import { rawOf } from "./types";
 import { findBankByText } from "./banks";
+import { KIND_LABEL } from "./labels";
 
 // ---------------------------------------------------------------------------
 // Severity weights + legit offset
@@ -24,16 +29,14 @@ const WEIGHTS: Record<Severity, number> = { danger: 0.4, warn: 0.18, info: 0 };
 const LEGIT_OFFSET_PER_OK = 0.15;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Internal heuristic weight used only to rank how many/how serious the flags
+ * are. It is NOT a probability and is never shown to users as a percentage.
+ */
 export function score(findings: Finding[]): number {
   const points = findings.reduce((s, f) => s + WEIGHTS[f.severity], 0);
   const legit = findings.filter((f) => f.id === "bank-verify-ok").length * LEGIT_OFFSET_PER_OK;
   return Math.max(0, Math.min(1, points - legit));
-}
-
-function levelFromConfidence(c: number): VerdictLevel {
-  if (c >= 0.7) return "scam";
-  if (c >= 0.3) return "suspicious";
-  return "clean"; // computeVerdict downgrades this to "unverifiable" without real checks
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +68,17 @@ export function extractAmounts(text: string): number[] {
       const n = parseAmount(m[1]);
       if (n !== undefined) out.add(n);
     }
+  }
+  return [...out];
+}
+
+/** Account balances stated in text ("Bal: NGN 120,500.00", "Available Balance N9,000"). */
+export function extractBalances(text: string): number[] {
+  const out = new Set<number>();
+  const re = /\bbal(?:ance)?\.?\s*[:\-]?\s*(?:NGN|₦|N)?\s*([\d,]+(?:\.\d{1,2})?)/gi;
+  for (const m of text.matchAll(re)) {
+    const n = parseAmount(m[1]);
+    if (n !== undefined) out.add(n);
   }
   return [...out];
 }
@@ -429,7 +443,8 @@ export function analyzePiece(ev: Evidence, now: number = Date.now()): Finding[] 
       break;
     }
     case "phone":
-      break; // phones are evaluated in cross-piece rules
+    case "balance":
+      break; // phones and balances are evaluated in cross-piece rules
   }
   return dedupe(f);
 }
@@ -597,13 +612,29 @@ export function analyzeCross(evs: Evidence[]): Finding[] {
     }
   }
 
+  // R-BALANCE: the balance the user read in their own bank app vs the balance
+  // printed in the alert. A mismatch is a contradiction (a failed check).
+  const balEvs = evs.filter((e): e is BalanceEvidence => e.kind === "balance");
+  if (balEvs.length > 0) {
+    const alertSrcs = evs.filter((e) => e.kind === "screenshot" || e.kind === "text");
+    const alertBalances = alertSrcs.flatMap((e) => extractBalances(rawOf(e)));
+    if (alertBalances.length > 0 && !balEvs.some((b) => alertBalances.some((a) => sameAmount(a, b.balance)))) {
+      findings.push({
+        id: "balance-mismatch",
+        severity: "danger",
+        message: `Balance does not match: your bank shows ${fmtAmounts(balEvs.map((b) => b.balance))} but the alert shows ${fmtAmounts(alertBalances)}.`,
+        evidenceIds: [...balEvs.map((b) => b.id), ...alertSrcs.filter((e) => extractBalances(rawOf(e)).length > 0).map((e) => e.id)],
+      });
+    }
+  }
+
   return findings;
 }
 
 // ---------------------------------------------------------------------------
 // Verdict
 // ---------------------------------------------------------------------------
-/** Findings that on their own make the verdict "scam" (a link/text impersonating a bank). */
+/** Findings that on their own make the verdict LIKELY_FAKE (a link/text impersonating a bank). */
 const CRITICAL_IDS = new Set([
   "link-bank-impersonation",
   "link-lookalike",
@@ -617,22 +648,52 @@ const CRITICAL_WHEN_DANGER = new Set(["amount-mismatch", "account-mismatch"]);
 const isCritical = (f: Finding) =>
   CRITICAL_IDS.has(f.id) || (CRITICAL_WHEN_DANGER.has(f.id) && f.severity === "danger");
 
+/** Findings that are contradictions between pieces / failed independent checks. */
+const CONTRADICTION_IDS = new Set([
+  "phone-mismatch",
+  "bank-mismatch",
+  "bank-verify-mismatch",
+  "amount-mismatch",
+  "account-mismatch",
+  "balance-mismatch",
+  "link-merchant-mismatch",
+]);
+
 /**
- * Real checks that passed. "Clean" requires at least one; with none, the
- * evidence simply cannot be verified (e.g. a phone number alone).
+ * Real checks that passed. Only INDEPENDENT checks (a matching bank
+ * confirmation, or a user-entered balance equal to the alert balance) can make
+ * a verdict VERIFIED. Everything else (https official link, matching phone,
+ * matching amount...) is supporting only: such details are easy to fake.
  */
 export function collectChecks(evs: Evidence[], findings: Finding[]): PassedCheck[] {
   const checks: PassedCheck[] = [];
 
   for (const f of findings) {
-    if (f.id === "bank-verify-ok") checks.push({ id: f.id, message: f.message });
+    if (f.id === "bank-verify-ok") checks.push({ id: f.id, message: f.message, independent: true });
+  }
+
+  // User-entered balance equals the balance printed in the alert.
+  const balEvs = evs.filter((e): e is BalanceEvidence => e.kind === "balance");
+  if (balEvs.length > 0) {
+    const alertBalances = evs
+      .filter((e) => e.kind === "screenshot" || e.kind === "text")
+      .flatMap((e) => extractBalances(rawOf(e)));
+    const hit = balEvs.find((b) => alertBalances.some((a) => sameAmount(a, b.balance)));
+    if (hit) {
+      checks.push({
+        id: "balance-match",
+        message: `The balance you checked yourself (${fmtAmounts([hit.balance])}) equals the balance in the alert.`,
+        independent: true,
+      });
+    }
   }
 
   // Official bank website over https (standalone link or inside any text).
+  // Supporting only: scam sites also use https, and this proves nothing about the payment.
   const urls = new Set<string>();
   for (const ev of evs) {
     if (ev.kind === "link") urls.add(ev.url);
-    else for (const u of extractUrls(rawOf(ev))) urls.add(u);
+    else if (ev.kind !== "balance") for (const u of extractUrls(rawOf(ev))) urls.add(u);
   }
   const seenHosts = new Set<string>();
   for (const u of urls) {
@@ -640,7 +701,7 @@ export function collectChecks(evs: Evidence[], findings: Finding[]): PassedCheck
     const brand = host ? officialBrandOf(host) : undefined;
     if (host && brand && u.toLowerCase().startsWith("https://") && !seenHosts.has(host)) {
       seenHosts.add(host);
-      checks.push({ id: "link-official", message: `The link ${host} is an official ${brand} website (https).` });
+      checks.push({ id: "link-official", message: `The link ${host} is an official ${brand} website (https). This does not prove the payment is real.`, independent: false });
     }
   }
 
@@ -649,34 +710,166 @@ export function collectChecks(evs: Evidence[], findings: Finding[]): PassedCheck
   if (phoneEv) {
     const n = normalizePhone(rawOf(phoneEv));
     const known = extractPhones(evs.filter((e) => e.kind !== "phone").map(rawOf).join("\n"));
-    if (n && known.includes(n)) checks.push({ id: "phone-match", message: "The phone number you entered matches the one in the alert/message." });
+    if (n && known.includes(n)) checks.push({ id: "phone-match", message: "The phone number you entered matches the one in the alert/message.", independent: false });
   }
 
   const srcs = sourcesOf(evs);
   if (comparePairs(srcs, (s) => s.amounts, sameAmount).matches > 0) {
-    checks.push({ id: "amount-match", message: "The amount matches across your evidence." });
+    checks.push({ id: "amount-match", message: "The amount matches across your evidence.", independent: false });
   }
   if (comparePairs(srcs, (s) => s.accounts, accountsCompatible).matches > 0) {
-    checks.push({ id: "account-match", message: "The account digits match across your evidence." });
+    checks.push({ id: "account-match", message: "The account digits match across your evidence.", independent: false });
   }
   return checks;
 }
 
-/** Never let a verdict read "clean" while flags exist; critical flags force "scam". */
-function applyFloors(
+const plural = (n: number, one: string, many: string = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+function riskFor(level: VerdictLevel, internal: number, criticalCount: number): RiskLevel {
+  switch (level) {
+    case "VERIFIED":
+      return "LOW";
+    case "UNVERIFIED":
+      return "MODERATE"; // unknown is never LOW
+    case "SUSPICIOUS":
+      return internal >= 0.4 ? "HIGH" : "MODERATE";
+    case "LIKELY_FAKE":
+      return internal >= 0.8 || criticalCount >= 2 ? "CRITICAL" : "HIGH";
+  }
+}
+
+function buildExplanation(
+  evs: Evidence[],
+  level: VerdictLevel,
+  flags: Finding[],
+  contradictions: Contradiction[],
+  independent: PassedCheck[],
+): string {
+  if (evs.length === 0) return "No evidence has been added yet, so nothing could be checked.";
+  const kinds = [...new Set(evs.map((e) => KIND_LABEL[e.kind].toLowerCase()))].join(", ");
+  const parts = [`We examined ${plural(evs.length, "piece")} of evidence (${kinds}).`];
+  if (flags.length > 0) {
+    const strongest = flags.find((f) => f.severity === "danger") ?? flags[0];
+    parts.push(
+      `We found ${plural(flags.length, "warning sign")}` +
+        (contradictions.length > 0 ? `, including ${plural(contradictions.length, "contradiction")} between your pieces of evidence` : "") +
+        `. The most serious: ${strongest.message}`,
+    );
+  } else {
+    parts.push("We found no warning signs. That alone does not mean it is safe.");
+  }
+  if (independent.length > 0) {
+    parts.push(`An independent check passed: ${independent.map((c) => c.message).join(" ")}`);
+  } else {
+    parts.push(
+      "No independent check passed (a matching bank confirmation, or your own balance equal to the alert balance), so nothing here confirms the payment is real.",
+    );
+  }
+  switch (level) {
+    case "VERIFIED":
+      parts.push("Because an independent source agrees and nothing contradicts it, the result is VERIFIED.");
+      break;
+    case "LIKELY_FAKE":
+      parts.push("Because of the strong warning signs, the result is LIKELY FAKE.");
+      break;
+    case "SUSPICIOUS":
+      parts.push(
+        independent.length > 0
+          ? "Even though one check passed, the warning signs remain, so the result is SUSPICIOUS."
+          : "Because of the warning signs, the result is SUSPICIOUS. It is not conclusive.",
+      );
+      break;
+    case "UNVERIFIED":
+      parts.push("Because nothing independent confirms it, the result is UNVERIFIED. This is not the same as safe.");
+      break;
+  }
+  return parts.join(" ");
+}
+
+function buildReport(
+  evs: Evidence[],
+  level: VerdictLevel,
   all: Finding[],
-  confidence: number,
-  pieceFindings: Record<string, Finding[]>,
   checks: PassedCheck[],
-): Verdict {
-  let c = confidence;
-  if (all.some(isCritical)) c = Math.max(c, 0.7);
-  else if (all.some((f) => f.severity === "danger" || f.severity === "warn")) c = Math.max(c, 0.3);
-  c = Math.round(c * 100) / 100;
-  let level = levelFromConfidence(c);
-  // Green "Clean" only when a real check passed; otherwise it is neutral.
-  if (level === "clean" && checks.length === 0) level = "unverifiable";
-  return { level, confidence: c, findings: all, pieceFindings, checks };
+  now: number,
+): Report {
+  const has = (k: Evidence["kind"]) => evs.some((e) => e.kind === k);
+  const hasLink = has("link") || evs.some((e) => e.kind !== "balance" && extractUrls(rawOf(e)).length > 0);
+
+  const methods: string[] = [];
+  if (evs.length > 0) {
+    if (has("screenshot") || has("text") || has("bank-verify")) {
+      methods.push("Pattern checks on message and screenshot text (urgency language, spoofed senders, claims that ask you to click to confirm a credit, old or future dates).");
+    }
+    if (hasLink) methods.push("Link analysis (shortened links, look-alike or impersonating bank domains, unusual endings, http vs https).");
+    if (evs.length > 1) methods.push("Cross-checking amounts, account digits, phone numbers and bank names between your pieces of evidence.");
+    if (has("bank-verify")) methods.push("Bank confirmation check (expected sender line and an amount matching the alert).");
+    if (has("balance")) methods.push("Balance comparison (the balance you checked yourself vs the balance in the alert).");
+    methods.push("All checks ran on your device. Nothing was sent anywhere.");
+  }
+
+  const flags = all.filter((f) => f.severity !== "info");
+  const contradictions: Contradiction[] = flags
+    .filter((f) => CONTRADICTION_IDS.has(f.id) || (f.evidenceIds?.length ?? 0) >= 2)
+    .map((f) => ({ evidenceId: f.evidenceId!, message: f.message }));
+
+  const missing: string[] = [];
+  if (evs.length === 0) missing.push("No evidence has been added yet.");
+  else {
+    if (!has("screenshot") && !has("text")) missing.push("A payment alert (screenshot or pasted message) to compare the other pieces against.");
+    const bankOk = checks.some((c) => c.id === "bank-verify-ok");
+    if (!bankOk) {
+      missing.push(
+        has("bank-verify")
+          ? "The bank confirmation does not yet prove the payment: it needs a sender line naming your bank and an amount that matches the alert."
+          : "A confirmation SMS from your own bank (use Bank verify).",
+      );
+    }
+    if (!checks.some((c) => c.id === "balance-match")) {
+      const alertHasBalance = evs.some((e) => (e.kind === "screenshot" || e.kind === "text") && extractBalances(rawOf(e)).length > 0);
+      if (!has("balance")) missing.push("The balance you see in your own bank app or by USSD, to compare with the alert balance.");
+      else if (!alertHasBalance) missing.push("The alert shows no balance, so the balance you entered could not be compared.");
+    }
+  }
+
+  const limitations = [
+    "No warning signs found is not proof that a payment is real. Scammers can build fake alerts that pass these checks.",
+    "TrustCheck does not look up phone numbers, links or accounts in any scam-report database. A link or number with no reports is not safe.",
+    "A secure (https) link only means the connection is encrypted. Scam websites use https too.",
+    "Screenshots can be edited, and text read from a screenshot (OCR) can contain mistakes.",
+    "A web app cannot read your SMS inbox or run USSD codes, so bank checks rely on what you paste or enter yourself.",
+  ];
+
+  const actions: string[] = [];
+  switch (level) {
+    case "VERIFIED":
+      actions.push("An independent source agrees with the alert. Still confirm the money in your bank app before releasing goods or services.");
+      break;
+    case "UNVERIFIED":
+      actions.push("Do not release goods or services yet.");
+      actions.push("Check your balance in your own bank app or by USSD, then add it here or use Bank verify.");
+      break;
+    case "SUSPICIOUS":
+      actions.push("Do not click any link and do not release goods or services until the money shows in your own bank app.");
+      actions.push("Confirm with your bank using Bank verify, or check your balance yourself.");
+      break;
+    case "LIKELY_FAKE":
+      actions.push("Do not release goods or services, click any link, or call the number given.");
+      actions.push("Report it to your bank and block the sender.");
+      break;
+  }
+  actions.push("Never share your PIN, OTP or BVN with anyone.");
+
+  return {
+    generatedAt: now,
+    generatedAtIso: new Date(now).toISOString(),
+    evidenceExamined: evs.map((e) => ({ id: e.id, kind: e.kind, label: KIND_LABEL[e.kind] })),
+    methods,
+    contradictions,
+    missingInformation: missing,
+    limitations,
+    recommendedActions: actions,
+  };
 }
 
 export function computeVerdict(evs: Evidence[], now: number = Date.now()): Verdict {
@@ -699,6 +892,33 @@ export function computeVerdict(evs: Evidence[], now: number = Date.now()): Verdi
     for (const eid of f.evidenceIds ?? []) (pieceFindings[eid] ??= []).push(f);
   }
 
-  const confidence = Math.round(score(all) * 100) / 100;
-  return applyFloors(all, confidence, pieceFindings, collectChecks(evs, all));
+  const checks = collectChecks(evs, all);
+
+  // Every finding and passed check gets a unique, stable evidence ID. Findings
+  // are shared by reference between `all` and `pieceFindings`, so they carry it everywhere.
+  let n = 0;
+  const nextId = () => `EV-${String(++n).padStart(3, "0")}`;
+  for (const f of all) f.evidenceId = nextId();
+  for (const c of checks) c.evidenceId = nextId();
+
+  // Heuristic internal weight (never shown as a number).
+  const flags = all.filter((f) => f.severity !== "info");
+  const criticals = all.filter(isCritical);
+  let internal = score(all);
+  if (criticals.length > 0) internal = Math.max(internal, 0.7);
+  else if (flags.length > 0) internal = Math.max(internal, 0.3);
+
+  const independent = checks.filter((c) => c.independent);
+  let level: VerdictLevel;
+  if (internal >= 0.7) level = "LIKELY_FAKE";
+  else if (internal >= 0.3) level = "SUSPICIOUS";
+  // VERIFIED only when no flag exists AND an independent check passed.
+  // "No warning signs", an https link, a screenshot, etc. are never enough.
+  else level = flags.length === 0 && independent.length > 0 ? "VERIFIED" : "UNVERIFIED";
+
+  const risk = riskFor(level, internal, criticals.length);
+  const report = buildReport(evs, level, all, checks, now);
+  const explanation = buildExplanation(evs, level, flags, report.contradictions, independent);
+
+  return { level, risk, explanation, findings: all, pieceFindings, checks, report };
 }

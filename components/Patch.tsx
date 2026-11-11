@@ -1,14 +1,8 @@
 "use client";
 
 import type { Evidence, Finding } from "@/lib/types";
+import { KIND_LABEL } from "@/lib/labels";
 
-const KIND_LABEL: Record<Evidence["kind"], string> = {
-  screenshot: "Screenshot (OCR)",
-  text: "Text message",
-  link: "Link",
-  phone: "Phone number",
-  "bank-verify": "Bank verification",
-};
 
 function summary(ev: Evidence): string {
   switch (ev.kind) {
@@ -22,6 +16,8 @@ function summary(ev: Evidence): string {
       return ev.phone;
     case "bank-verify":
       return `[${ev.bank.name}] ${ev.confirmationSms}`;
+    case "balance":
+      return `₦${ev.balance.toLocaleString("en-US")}`;
   }
 }
 
@@ -63,9 +59,10 @@ export function Patch({
         <ul className="mt-2 space-y-1">
           {findings.map((f) => (
             <li
-              key={f.id}
+              key={f.evidenceId ?? f.id}
               className={`rounded px-2 py-1 text-xs ${SEV_BADGE[f.severity]}`}
             >
+              {f.evidenceId && <code className="mr-1 font-semibold">{f.evidenceId}</code>}
               {f.message}
             </li>
           ))}

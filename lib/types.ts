@@ -6,7 +6,8 @@ export type EvidenceKind =
   | "text"
   | "link"
   | "phone"
-  | "bank-verify";
+  | "bank-verify"
+  | "balance";
 
 export type Severity = "info" | "warn" | "danger";
 
@@ -17,34 +18,88 @@ export interface Finding {
   severity: Severity;
   /** Human-readable reason, in English (the Gemini layer adds Hausa). */
   message: string;
-  /** Evidence patches this finding relates to (cross-piece seams). The flag is
-   *  shown on each of these patches. */
+  /** Evidence patches (piece ids) this finding relates to (cross-piece seams).
+   *  The flag is shown on each of these patches. Not the same as `evidenceId`. */
   evidenceIds?: string[];
+  /**
+   * Report-level evidence ID, e.g. "EV-003". Assigned by computeVerdict: every
+   * finding and passed check in a Verdict has a unique one (stable for the same
+   * input). Absent only on findings returned directly by analyzePiece/analyzeCross.
+   */
+  evidenceId?: string;
 }
 
-/** A real check that passed (a positive signal). "Clean" requires at least one. */
+/** A real check that passed (a positive signal). */
 export interface PassedCheck {
   id: string;
   message: string;
+  /** Report-level evidence ID, e.g. "EV-007" (assigned by computeVerdict). */
+  evidenceId?: string;
+  /**
+   * True only for checks that come from a source independent of the evidence
+   * itself: a matching bank confirmation or a user-entered balance equal to the
+   * alert balance. Only independent checks can make a verdict VERIFIED.
+   */
+  independent: boolean;
 }
 
 /**
- * "unverifiable" = neutral "Cannot verify": no red flags, but also nothing
- * checkable passed (e.g. a phone number on its own). Never shown as green.
+ * The four verdicts.
+ *  - VERIFIED    an independent check passed and nothing contradicts it.
+ *  - LIKELY_FAKE strong evidence of a scam.
+ *  - SUSPICIOUS  warning signs found, not conclusive.
+ *  - UNVERIFIED  nothing independent could confirm it (this is NOT "safe").
  */
-export type VerdictLevel = "clean" | "unverifiable" | "suspicious" | "scam";
+export type VerdictLevel = "VERIFIED" | "LIKELY_FAKE" | "SUSPICIOUS" | "UNVERIFIED";
+
+export const VERDICT_LEVELS: readonly VerdictLevel[] = ["VERIFIED", "LIKELY_FAKE", "SUSPICIOUS", "UNVERIFIED"];
+
+export type RiskLevel = "LOW" | "MODERATE" | "HIGH" | "CRITICAL";
+
+export const RISK_LEVELS: readonly RiskLevel[] = ["LOW", "MODERATE", "HIGH", "CRITICAL"];
+
+/** One piece of evidence listed in the report. */
+export interface ExaminedEvidence {
+  /** Piece id (matches the patch). */
+  id: string;
+  kind: EvidenceKind;
+  /** Short human label, e.g. "Screenshot (OCR)". */
+  label: string;
+}
+
+/** A contradiction (seam) between pieces, with its report evidence ID. */
+export interface Contradiction {
+  evidenceId: string;
+  message: string;
+}
+
+/** The structured, explainable report behind a verdict. */
+export interface Report {
+  /** When the report was produced (epoch ms; injected `now`). */
+  generatedAt: number;
+  /** ISO-8601 form of generatedAt. */
+  generatedAtIso: string;
+  evidenceExamined: ExaminedEvidence[];
+  methods: string[];
+  contradictions: Contradiction[];
+  missingInformation: string[];
+  limitations: string[];
+  recommendedActions: string[];
+}
 
 /** The stitched verdict — the "monster" assembled from the evidence patches. */
 export interface Verdict {
   level: VerdictLevel;
-  /** 0..1 confidence that the interaction is a scam. */
-  confidence: number;
+  risk: RiskLevel;
+  /** Plain-language account of how the verdict was reached (no percentages). */
+  explanation: string;
   /** All findings, aggregated across pieces and cross-piece rules. */
   findings: Finding[];
   /** Findings grouped by the evidence id they relate to. */
   pieceFindings: Record<string, Finding[]>;
-  /** Real checks that passed. Empty => the verdict can never be "clean". */
+  /** Real checks that passed. */
   checks: PassedCheck[];
+  report: Report;
 }
 
 /** A bank in the guided-verification catalog. */
@@ -100,12 +155,24 @@ export interface BankVerifyEvidence extends EvidenceBase {
   confirmationSms: string;
 }
 
+/**
+ * The account balance the user read from their own bank app / USSD balance
+ * check (NOT from the alert). Independent evidence: compared to the balance
+ * shown in the alert.
+ */
+export interface BalanceEvidence extends EvidenceBase {
+  kind: "balance";
+  /** Naira, as entered by the user. */
+  balance: number;
+}
+
 export type Evidence =
   | ScreenshotEvidence
   | TextEvidence
   | LinkEvidence
   | PhoneEvidence
-  | BankVerifyEvidence;
+  | BankVerifyEvidence
+  | BalanceEvidence;
 
 /** A canonical raw-text view of an evidence piece (used for cross-checking). */
 export function rawOf(ev: Evidence): string {
@@ -120,5 +187,7 @@ export function rawOf(ev: Evidence): string {
       return ev.phone;
     case "bank-verify":
       return ev.confirmationSms;
+    case "balance":
+      return `₦${ev.balance}`;
   }
 }

@@ -182,22 +182,22 @@ describe("analyzeCross", () => {
 });
 
 describe("score + computeVerdict", () => {
-  it("empty evidence => cannot verify, confidence 0", () => {
+  it("empty evidence => UNVERIFIED, nothing flagged", () => {
     const v = computeVerdict([], NOW);
-    expect(v.level).toBe("unverifiable");
-    expect(v.confidence).toBe(0);
+    expect(v.level).toBe("UNVERIFIED");
+    expect(v.findings).toEqual([]);
   });
   it("one danger => suspicious", () => {
     const v = computeVerdict([shot("From: 08031234567"), phone("08111111111")], NOW);
-    expect(v.confidence).toBe(0.4);
-    expect(v.level).toBe("suspicious");
+    expect(score(v.findings)).toBe(0.4);
+    expect(v.level).toBe("SUSPICIOUS");
   });
   it("two dangers => scam", () => {
     const v = computeVerdict([link("https://paypa1.com"), shot("From: 08031234567"), phone("08111111111")], NOW);
-    expect(v.confidence).toBe(0.8);
-    expect(v.level).toBe("scam");
+    expect(score(v.findings)).toBe(0.8);
+    expect(v.level).toBe("LIKELY_FAKE");
   });
-  it("two warns => suspicious, one warn => clean", () => {
+  it("score weights: two warns => 0.36, one warn => 0.18", () => {
     expect(score([{ id: "w", severity: "warn", message: "x" }, { id: "w2", severity: "warn", message: "y" }])).toBeCloseTo(0.36, 5);
     expect(score([{ id: "w", severity: "warn", message: "x" }])).toBeCloseTo(0.18, 5);
   });
@@ -210,12 +210,12 @@ describe("score + computeVerdict", () => {
     ];
     const v = computeVerdict(evs, NOW);
     expect(v.findings.some((f) => f.id === "bank-verify-ok")).toBe(true);
-    expect(v.confidence).toBe(0.3); // a danger flag is never "clean"
-    expect(v.level).toBe("suspicious");
+    // a danger flag is never VERIFIED, even next to a passed check
+    expect(v.level).toBe("SUSPICIOUS");
   });
   it("a bank-impersonating link is scam even with a good bank-verify", () => {
     const v = computeVerdict([link("https://paypa1.com"), verify("GTBank", "GTBank N5000 successful")], NOW);
-    expect(v.level).toBe("scam");
+    expect(v.level).toBe("LIKELY_FAKE");
   });
   it("pieceFindings grouped by id, cross under __cross__", () => {
     const v = computeVerdict([shot("From: 08031234567"), phone("08111111111")], NOW);
@@ -243,14 +243,13 @@ describe("bank-impersonation scam (gtb-verify.xyz)", () => {
 
   it("verdict is scam for both pieces together, and for each alone", () => {
     const both = computeVerdict([text(scamText), link(scamLink)], NOW);
-    expect(both.level).toBe("scam");
-    expect(both.confidence).toBeGreaterThanOrEqual(0.7);
-    expect(computeVerdict([text(scamText)], NOW).level).toBe("scam");
-    expect(computeVerdict([link(scamLink)], NOW).level).toBe("scam");
+    expect(both.level).toBe("LIKELY_FAKE");
+    expect(computeVerdict([text(scamText)], NOW).level).toBe("LIKELY_FAKE");
+    expect(computeVerdict([link(scamLink)], NOW).level).toBe("LIKELY_FAKE");
   });
 
-  it("a lone warn flag is never reported as clean", () => {
-    expect(computeVerdict([link("http://example.com")], NOW).level).toBe("suspicious");
+  it("a lone warn flag is never reported as UNVERIFIED or VERIFIED", () => {
+    expect(computeVerdict([link("http://example.com")], NOW).level).toBe("SUSPICIOUS");
   });
 });
 
@@ -260,15 +259,16 @@ describe("normal real alert", () => {
     expect(analyzePiece(text(real), NOW)).toEqual([]);
     const v = computeVerdict([text(real)], NOW);
     expect(v.findings).toHaveLength(0);
-    expect(v.level).toBe("unverifiable");
+    expect(v.level).toBe("UNVERIFIED");
   });
-  it("official bank domains are not flagged; with an https official link a real check passed => clean", () => {
+  it("official bank domains are not flagged; an https official link is supporting only => still UNVERIFIED", () => {
     for (const u of ["https://gtbank.com", "https://www.gtbank.com/online", "https://ibank.gtbank.com", "https://www.zenithbank.com"]) {
       expect(analyzePiece(link(u), NOW)).toEqual([]);
     }
     const v = computeVerdict([text(real), link("https://www.gtbank.com")], NOW);
-    expect(v.level).toBe("clean");
+    expect(v.level).toBe("UNVERIFIED");
     expect(v.checks.map((c) => c.id)).toContain("link-official");
+    expect(v.checks.every((c) => !c.independent)).toBe(true);
   });
 });
 
@@ -289,7 +289,7 @@ describe("1. screenshot (OCR) text goes through the same scam rules", () => {
   it("shows the flags on the screenshot patch and makes the verdict a scam", () => {
     const s = shot(scamOcr);
     const v = computeVerdict([s], NOW);
-    expect(v.level).toBe("scam");
+    expect(v.level).toBe("LIKELY_FAKE");
     expect(v.pieceFindings[s.id].some((f) => f.id === "text-link-impersonation")).toBe(true);
   });
   it("a genuine alert in a screenshot raises no new flags", () => {
@@ -304,7 +304,7 @@ describe("2. shortened links", () => {
       const f = analyzePiece(link(u), NOW).find((x) => x.id === "link-shortener");
       expect(f?.severity).toBe("warn");
       expect(f?.message).toMatch(/destination is hidden/i);
-      expect(computeVerdict([link(u)], NOW).level).toBe("suspicious");
+      expect(computeVerdict([link(u)], NOW).level).toBe("SUSPICIOUS");
     },
   );
   it("also warns about shortened links inside pasted text and OCR text", () => {
@@ -316,22 +316,22 @@ describe("2. shortened links", () => {
   });
 });
 
-describe("3. cannot verify vs clean", () => {
-  it("a phone number alone is 'unverifiable', not clean", () => {
+describe("3. UNVERIFIED vs VERIFIED", () => {
+  it("a phone number alone is UNVERIFIED, not VERIFIED", () => {
     const v = computeVerdict([phone("08031234567")], NOW);
-    expect(v.level).toBe("unverifiable");
+    expect(v.level).toBe("UNVERIFIED");
     expect(v.checks).toEqual([]);
   });
-  it("a plain link with no checkable signals is 'unverifiable'", () => {
-    expect(computeVerdict([link("https://example.com")], NOW).level).toBe("unverifiable");
+  it("a plain link with no checkable signals is UNVERIFIED", () => {
+    expect(computeVerdict([link("https://example.com")], NOW).level).toBe("UNVERIFIED");
   });
-  it("clean needs a real passed check (matching phone + alert)", () => {
+  it("a matching phone + alert is supporting only, not VERIFIED", () => {
     const v = computeVerdict([shot("GTBank\nFrom: 08031234567\nCredit N5,000"), phone("08031234567")], NOW);
-    expect(v.level).toBe("clean");
+    expect(v.level).toBe("UNVERIFIED");
     expect(v.checks.map((c) => c.id)).toContain("phone-match");
   });
   it("flags still win over 'unverifiable'", () => {
-    expect(computeVerdict([link("http://example.com")], NOW).level).toBe("suspicious");
+    expect(computeVerdict([link("http://example.com")], NOW).level).toBe("SUSPICIOUS");
   });
 });
 
@@ -347,7 +347,7 @@ describe("4. weak 'mentions the bank' is no longer a trust signal", () => {
   it("a bank SMS alone (no alert amount to compare) is not verified => cannot verify", () => {
     const v = computeVerdict([verify("GTBank", "From: GTBank\nN5,000 successful")], NOW);
     expect(v.findings.some((f) => f.id === "bank-verify-ok")).toBe(false);
-    expect(v.level).toBe("unverifiable");
+    expect(v.level).toBe("UNVERIFIED");
   });
   it("sender format OK but amount missing from the alert side => not verified", () => {
     const v = computeVerdict([text("hello"), verify("GTBank", "From: GTBank\nN5,000 successful")], NOW);
@@ -363,11 +363,12 @@ describe("4. weak 'mentions the bank' is no longer a trust signal", () => {
       expect(v.findings.some((f) => f.id === "bank-verify-ok")).toBe(false);
     }
   });
-  it("expected sender + matching alert amount => verified, a real check, and clean", () => {
+  it("expected sender + matching alert amount => independent check passed => VERIFIED", () => {
     const v = computeVerdict([alert, verify("GTBank", "From: GTBank\nGTBank: N5,000 transfer successful")], NOW);
     expect(v.findings.some((f) => f.id === "bank-verify-ok")).toBe(true);
     expect(v.checks.map((c) => c.id)).toContain("bank-verify-ok");
-    expect(v.level).toBe("clean");
+    expect(v.level).toBe("VERIFIED");
+    expect(v.risk).toBe("LOW");
   });
 });
 
@@ -386,7 +387,7 @@ describe("5. cross-checking amounts and account digits", () => {
     expect(f?.message).toContain("₦5,000");
     expect(v.pieceFindings[s.id].some((x) => x.id === "amount-mismatch")).toBe(true);
     expect(v.pieceFindings[b.id].some((x) => x.id === "amount-mismatch")).toBe(true);
-    expect(v.level).toBe("scam");
+    expect(v.level).toBe("LIKELY_FAKE");
     expect(v.findings.some((x) => x.id === "bank-verify-ok")).toBe(false);
   });
   it("same mismatch works for pasted text vs bank SMS", () => {
@@ -395,7 +396,7 @@ describe("5. cross-checking amounts and account digits", () => {
     const v = computeVerdict([t, b], NOW);
     expect(v.pieceFindings[t.id].some((x) => x.id === "amount-mismatch")).toBe(true);
     expect(v.pieceFindings[b.id].some((x) => x.id === "amount-mismatch")).toBe(true);
-    expect(v.level).toBe("scam");
+    expect(v.level).toBe("LIKELY_FAKE");
   });
   it("matching amounts => no mismatch and an amount-match check", () => {
     const v = computeVerdict([shot("Credit N5,000 GTBank"), bankSms()], NOW);
@@ -418,7 +419,7 @@ describe("5. cross-checking amounts and account digits", () => {
     expect(f?.message).toMatch(/^Account digits do not match/);
     expect(v.pieceFindings[s.id].some((x) => x.id === "account-mismatch")).toBe(true);
     expect(v.pieceFindings[b.id].some((x) => x.id === "account-mismatch")).toBe(true);
-    expect(v.level).toBe("scam");
+    expect(v.level).toBe("LIKELY_FAKE");
   });
   it("masked account digits are compared on the visible digits", () => {
     const ok = computeVerdict([shot("Credit N5,000 Acct 012***789"), verify("GTBank", "From: GTBank\nN5,000 GTBank Acct 0123456789")], NOW);

@@ -24,7 +24,7 @@ const req = (body: unknown) =>
     body: JSON.stringify(body),
   });
 
-const good = { verdictLevel: "scam", confidence: 0.8, findings: ["Link imitates GTBank"] };
+const good = { verdictLevel: "LIKELY_FAKE", riskLevel: "CRITICAL", findings: ["Link imitates GTBank"] };
 
 describe("POST /api/explain", () => {
   const original = process.env.GEMINI_API_KEY;
@@ -48,6 +48,14 @@ describe("POST /api/explain", () => {
     process.env.GEMINI_API_KEY = "test-key";
     const res = await POST(req({ ...good, verdictLevel: "nope" }));
     expect(res.status).toBe(400);
+  });
+
+  it("rejects the old verdict names and a missing/invalid riskLevel", async () => {
+    process.env.GEMINI_API_KEY = "test-key";
+    expect((await POST(req({ ...good, verdictLevel: "scam" }))).status).toBe(400);
+    expect((await POST(req({ ...good, verdictLevel: "clean" }))).status).toBe(400);
+    expect((await POST(req({ ...good, riskLevel: "nope" }))).status).toBe(400);
+    expect((await POST(req({ verdictLevel: "VERIFIED", findings: [] }))).status).toBe(400);
   });
 
   it("returns {en, ha} on success with a mocked SDK", async () => {

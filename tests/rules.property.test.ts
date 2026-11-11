@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import * as fc from "fast-check";
-import { computeVerdict } from "../lib/rules";
+import { computeVerdict, score } from "../lib/rules";
 import type { Evidence } from "../lib/types";
 import { BANKS, findBankByName } from "../lib/banks";
 
@@ -83,21 +83,22 @@ describe("rules engine — properties", () => {
     );
   });
 
-  it("always yields a valid level and confidence in [0,1] (2-decimal)", () => {
+  it("always yields a valid level + risk, no percentage field, and unique evidence IDs", () => {
     fc.assert(
       fc.property(fc.array(evidenceArb, { maxLength: 8 }), (evs) => {
         const v = computeVerdict(evs, NOW);
-        const levelOk = ["clean", "unverifiable", "suspicious", "scam"].includes(v.level);
-        const confOk = v.confidence >= 0 && v.confidence <= 1;
-        // robust 2-decimal check (avoids float artifacts like 0.58*100 === 57.999…)
-        const rounded = Math.round(v.confidence * 100) / 100 === v.confidence;
-        return levelOk && confOk && rounded;
+        const levelOk = ["VERIFIED", "LIKELY_FAKE", "SUSPICIOUS", "UNVERIFIED"].includes(v.level);
+        const riskOk = ["LOW", "MODERATE", "HIGH", "CRITICAL"].includes(v.risk);
+        const noPct = !("confidence" in v) && !/\d\s?%/.test(v.explanation);
+        const ids = [...v.findings.map((f) => f.evidenceId), ...v.checks.map((c) => c.evidenceId)];
+        const idsOk = ids.every((i) => /^EV-\d{3,}$/.test(i ?? "")) && new Set(ids).size === ids.length;
+        return levelOk && riskOk && noPct && idsOk;
       }),
       { numRuns: RUNS },
     );
   });
 
-  it("adding a contradicting phone never decreases confidence", () => {
+  it("adding a contradicting phone never decreases the internal flag weight", () => {
     fc.assert(
       fc.property(
         fc.tuple(
@@ -107,8 +108,8 @@ describe("rules engine — properties", () => {
         ),
         ([present, added, rest]) => {
           const base = [...rest, shotEv(`From: ${present}`)];
-          const c0 = computeVerdict(base, NOW).confidence;
-          const c1 = computeVerdict([...base, phoneEv(added)], NOW).confidence;
+          const c0 = score(computeVerdict(base, NOW).findings);
+          const c1 = score(computeVerdict([...base, phoneEv(added)], NOW).findings);
           return c1 >= c0;
         },
       ),
@@ -116,7 +117,7 @@ describe("rules engine — properties", () => {
     );
   });
 
-  it("a fully consistent, legit-looking set stays clean", () => {
+  it("a fully consistent set with an independent bank confirmation is VERIFIED", () => {
     const consistent: Evidence[] = [
       shotEv("GTBank\nFrom: 08031234567\nCredit N5,000.00\n01 Nov 2026"),
       textEv("GTBank: N5,000 credited to your account"),
@@ -125,18 +126,21 @@ describe("rules engine — properties", () => {
       verifyEv("GTBank", "From: GTBank\nGTBank: N5,000 transfer successful"),
     ];
     const v = computeVerdict(consistent, NOW);
-    expect(v.level).toBe("clean");
-    expect(v.confidence).toBe(0);
+    expect(v.level).toBe("VERIFIED");
+    expect(v.risk).toBe("LOW");
     // only non-flag (info) findings: the strongly confirmed bank SMS
     expect(v.findings.every((f) => f.id === "bank-verify-ok")).toBe(true);
     expect(v.checks.length).toBeGreaterThan(0);
   });
 
-  it("never reports clean without a passed check", () => {
+  it("never reports VERIFIED without an independent passed check, or alongside any flag", () => {
     fc.assert(
       fc.property(fc.array(evidenceArb, { maxLength: 8 }), (evs) => {
         const v = computeVerdict(evs, NOW);
-        return v.level !== "clean" || v.checks.length > 0;
+        return (
+          v.level !== "VERIFIED" ||
+          (v.checks.some((c) => c.independent) && v.findings.every((f) => f.severity === "info") && v.risk === "LOW")
+        );
       }),
       { numRuns: RUNS },
     );

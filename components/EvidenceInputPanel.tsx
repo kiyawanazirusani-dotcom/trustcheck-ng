@@ -7,6 +7,7 @@ import { TextPaste } from "./TextPaste";
 import { LinkInput } from "./LinkInput";
 import { PhoneInput } from "./PhoneInput";
 import { BankVerify } from "./BankVerify";
+import { BalanceInput } from "./BalanceInput";
 
 const TABS = [
   { id: "screenshot", label: "Screenshot", Comp: ScreenshotCapture },
@@ -14,6 +15,7 @@ const TABS = [
   { id: "link", label: "Link", Comp: LinkInput },
   { id: "phone", label: "Phone", Comp: PhoneInput },
   { id: "bank-verify", label: "Bank verify", Comp: BankVerify },
+  { id: "balance", label: "My balance", Comp: BalanceInput },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];

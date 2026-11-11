@@ -10,11 +10,12 @@ export const dynamic = "force-dynamic";
 const MAX_BODY_CHARS = 16_000; // payload is at most 20 findings x 300 chars
 const MODEL_TIMEOUT_MS = 20_000;
 
-const VALID_LEVELS = new Set(["clean", "unverifiable", "suspicious", "scam"]);
+const VALID_LEVELS = new Set(["VERIFIED", "LIKELY_FAKE", "SUSPICIOUS", "UNVERIFIED"]);
+const VALID_RISKS = new Set(["LOW", "MODERATE", "HIGH", "CRITICAL"]);
 
 interface ParsedRequest {
   verdictLevel: string;
-  confidencePct: number;
+  riskLevel: string;
   reasons: string[];
 }
 
@@ -27,27 +28,30 @@ function parseRequest(body: unknown): ParsedRequest | { status: number; error: s
   if (!VALID_LEVELS.has(verdictLevel)) {
     return { status: 400, error: "Invalid or missing verdictLevel" };
   }
-  const confidenceRaw = typeof b.confidence === "number" ? b.confidence : 0;
-  const confidencePct = Math.round(Math.min(1, Math.max(0, confidenceRaw)) * 100);
+  const riskLevel = typeof b.riskLevel === "string" ? b.riskLevel : "";
+  if (!VALID_RISKS.has(riskLevel)) {
+    return { status: 400, error: "Invalid or missing riskLevel" };
+  }
   const findings = Array.isArray(b.findings) ? b.findings : [];
   const reasons = findings
     .map((f) => (typeof f === "string" ? f : ""))
     .map((s) => s.slice(0, 300))
     .filter(Boolean)
     .slice(0, 20);
-  return { verdictLevel, confidencePct, reasons };
+  return { verdictLevel, riskLevel, reasons };
 }
 
-function buildPrompt(level: string, confidencePct: number, reasons: string[]): string {
+function buildPrompt(level: string, risk: string, reasons: string[]): string {
   const reasonList = reasons.length ? reasons.map((r) => `- ${r}`).join("\n") : "- No specific red flags were detected.";
   return `You are a fraud-awareness assistant for ordinary Nigerians. Explain a scam-check verdict briefly and clearly in BOTH English and Hausa.
-- Restate the verdict (${level}, ${confidencePct}% confidence) in simple words.
+- Restate the verdict (${level}, risk ${risk}) in simple words. Do not invent percentages or probabilities.
+- UNVERIFIED means nothing independent confirmed it; never describe it as safe. Only VERIFIED means an independent check passed.
 - Explain the main reasons in plain, non-technical language.
 - Give one clear, practical next step.
 Keep each explanation under 60 words. Return ONLY valid JSON with this exact shape and nothing else:
 {"en": "<English explanation>", "ha": "<Hausa explanation>"}
 
-Verdict: ${level} (${confidencePct}% confidence)
+Verdict: ${level}\nRisk level: ${risk}
 Reasons:
 ${reasonList}`;
 }
@@ -104,7 +108,7 @@ export async function POST(req: NextRequest) {
     const res = await Promise.race([
       ai.models.generateContent({
         model: "gemini-flash-latest",
-        contents: buildPrompt(parsed.verdictLevel, parsed.confidencePct, parsed.reasons),
+        contents: buildPrompt(parsed.verdictLevel, parsed.riskLevel, parsed.reasons),
       }),
       timeout,
     ]).finally(() => clearTimeout(timer));

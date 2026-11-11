@@ -2,9 +2,11 @@
 // ONLY network egress carrying user-derived content, and the UI calls it only
 // after the user explicitly consents to the exact payload being sent.
 
+import type { RiskLevel, VerdictLevel } from "./types";
+
 export interface ExplainRequest {
-  verdictLevel: "clean" | "unverifiable" | "suspicious" | "scam";
-  confidence: number;
+  verdictLevel: VerdictLevel;
+  riskLevel: RiskLevel;
   findings: string[];
 }
 
@@ -37,13 +39,13 @@ export async function fetchExplanation(
 /** Build the exact payload that would be sent. Used for BOTH the consent
  *  preview and the request, so what the user approves is what is sent. */
 export function buildExplainRequest(verdict: {
-  level: ExplainRequest["verdictLevel"];
-  confidence: number;
+  level: VerdictLevel;
+  risk: RiskLevel;
   findings: { message: string }[];
 }): ExplainRequest {
   return {
     verdictLevel: verdict.level,
-    confidence: verdict.confidence,
+    riskLevel: verdict.risk,
     findings: verdict.findings.map((f) => f.message),
   };
 }
