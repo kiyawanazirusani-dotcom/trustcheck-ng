@@ -7,6 +7,9 @@ import { GoogleGenAI } from "@google/genai";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const MAX_BODY_CHARS = 16_000; // payload is at most 20 findings x 300 chars
+const MODEL_TIMEOUT_MS = 20_000;
+
 const VALID_LEVELS = new Set(["clean", "unverifiable", "suspicious", "scam"]);
 
 interface ParsedRequest {
@@ -70,7 +73,11 @@ function parseBilingual(text: string): { en?: string; ha?: string } {
 export async function POST(req: NextRequest) {
   let body: unknown;
   try {
-    body = await req.json();
+    const raw = await req.text();
+    if (raw.length > MAX_BODY_CHARS) {
+      return NextResponse.json({ error: "Request too large" }, { status: 413 });
+    }
+    body = JSON.parse(raw);
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
@@ -90,10 +97,17 @@ export async function POST(req: NextRequest) {
 
   try {
     const ai = new GoogleGenAI({ apiKey });
-    const res = await ai.models.generateContent({
-      model: "gemini-flash-latest",
-      contents: buildPrompt(parsed.verdictLevel, parsed.confidencePct, parsed.reasons),
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("timeout")), MODEL_TIMEOUT_MS);
     });
+    const res = await Promise.race([
+      ai.models.generateContent({
+        model: "gemini-flash-latest",
+        contents: buildPrompt(parsed.verdictLevel, parsed.confidencePct, parsed.reasons),
+      }),
+      timeout,
+    ]).finally(() => clearTimeout(timer));
     const out = parseBilingual(res.text ?? "");
     if (!out.en && !out.ha) {
       return NextResponse.json({ error: "No explanation returned by the model." }, { status: 502 });
